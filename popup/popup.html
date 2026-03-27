@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CS Zoning Demo Tool</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="header">
+    <div class="header-top-row">
+      <div>
+        <div class="header-logo">🎭 CS Demo Tool</div>
+        <div class="header-sub">Zoning Override Manager</div>
+      </div>
+      <label class="switch" title="Extension Power">
+        <input type="checkbox" id="extension-toggle" checked>
+        <span class="slider"></span>
+      </label>
+    </div>
+  </div>
+
+  <div class="status-card" id="status-card">
+    <div class="status-row">
+      <span class="status-dot" id="status-dot"></span>
+      <span class="status-text" id="status-text">Checking page…</span>
+    </div>
+    <div class="edit-badge" id="edit-badge" style="display:none">✏️ Edit Mode Active</div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Edit Mode</div>
+    <button id="btn-edit-toggle" class="btn btn-primary" disabled>Enable Edit Mode</button>
+    <div class="hint" id="edit-hint">Open a Zoning report in ContentSquare to begin</div>
+  </div>
+
+  <div class="section">
+    <div class="section-label">Presentation Mode</div>
+    <button id="btn-ui-toggle" class="btn btn-secondary" disabled>Hide Extension UI</button>
+    <div class="hint">Keeps overrides active while hiding toolbar and edit popovers.</div>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section">
+    <div class="section-label">Override Summary</div>
+    <div class="override-info" id="override-info">No active overrides</div>
+    <button id="btn-reset-all" class="btn btn-danger" style="display:none">Reset All Overrides</button>
+  </div>
+
+  <div class="divider"></div>
+
+  <div class="section">
+    <div class="section-label">Scenarios</div>
+    <div class="save-row">
+      <input type="text" id="inp-scenario-name" class="inp" placeholder="Scenario name…" maxlength="50">
+      <button class="btn btn-save" id="btn-save-scenario">Save</button>
+    </div>
+    <div id="scenarios-list" class="scenarios-list">
+      <div class="empty-state">No scenarios saved for this page</div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>ContentSquare Demo Tool v1.0</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
