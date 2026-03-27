@@ -10,6 +10,7 @@
     editMode: false,
     uiVisible: true
   };
+  const seenNativeEvents = new WeakSet();
 
   function closestAcrossShadow(startEl, selector) {
     let node = startEl;
@@ -72,17 +73,46 @@
     });
   }
 
+  function findHeatmapLayerFromPath(path) {
+    const known = ['clicks', 'moves', 'scrolls', 'attention'];
+    for (const node of path) {
+      if (!(node instanceof Element)) continue;
+      const isControl = !!(node.matches && node.matches('button, [role="tab"], [role="button"]'));
+      if (!isControl) continue;
+      const text = (node.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      // Use the first whitespace-delimited token so counts/icons don't break matching
+      // (e.g. "clicks 4,521" or "moves ↑" still resolve to the correct layer).
+      const firstWord = text.split(' ')[0];
+      console.debug('[CS page-bridge] layer tab candidate:', JSON.stringify(text), '→ firstWord:', firstWord);
+      if (known.includes(firstWord)) return firstWord;
+    }
+    return '';
+  }
+
   function emitInteraction(event, source) {
-    if (!state.editMode || state.uiVisible === false) {
+    if (event && typeof event === 'object') {
+      if (seenNativeEvents.has(event)) return;
+      seenNativeEvents.add(event);
+    }
+
+    if (state.uiVisible === false) {
       return;
     }
 
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const heatmapLayer = findHeatmapLayerFromPath(path);
+
+    // Outside edit mode, only forward explicit heatmap layer tab interactions.
+    if (!state.editMode && !heatmapLayer) {
+      return;
+    }
+
     const detail = {
       source,
       eventType: event.type,
       zoneId: findZoneIdFromPath(path),
       heatmapSurface: hasHeatmapSurface(path),
+      heatmapLayer,
       clientX: Number(event.clientX) || 0,
       clientY: Number(event.clientY) || 0,
       pathPreview: buildPathPreview(path)
