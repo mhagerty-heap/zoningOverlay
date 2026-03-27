@@ -470,7 +470,7 @@
   function getAllZoneElements() {
     const list = [];
     collectZoneElementsFromRoot(document, list);
-    return Array.from(new Set(list));
+    return Array.from(new Set(list)).filter(el => !!el && el.isConnected);
   }
 
   function getCandidateZoneElements() {
@@ -2208,6 +2208,40 @@
   }
 
   function findZoneElementFromEvent(event) {
+    const x = Number(event?.clientX);
+    const y = Number(event?.clientY);
+    const pickBestByPoint = (all, px, py) => {
+      if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+      const candidates = all.filter(el => {
+        try {
+          const r = el.getBoundingClientRect();
+          return r.width > 0
+            && r.height > 0
+            && px >= r.left
+            && px <= r.right
+            && py >= r.top
+            && py <= r.bottom;
+        } catch (_) {
+          return false;
+        }
+      });
+
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => {
+        const ra = a.getBoundingClientRect();
+        const rb = b.getBoundingClientRect();
+        const areaDelta = (ra.width * ra.height) - (rb.width * rb.height);
+        if (areaDelta !== 0) return areaDelta;
+        const da = Math.hypot((ra.left + ra.width / 2) - px, (ra.top + ra.height / 2) - py);
+        const db = Math.hypot((rb.left + rb.width / 2) - px, (rb.top + rb.height / 2) - py);
+        return da - db;
+      });
+      return candidates[0] || null;
+    };
+
+    const byPoint = pickBestByPoint(getAllZoneElements(), x, y);
+    if (byPoint) return byPoint;
+
     const findClosestZone = node => {
       if (!(node instanceof Element)) return null;
       const tag = node.tagName ? node.tagName.toLowerCase() : '';
@@ -2228,37 +2262,14 @@
     if (fromTarget) return fromTarget;
 
     // Fallback: resolve by coordinates so replaced/custom subtree targets still map to a zone.
-    const x = Number(event?.clientX);
-    const y = Number(event?.clientY);
     if (Number.isFinite(x) && Number.isFinite(y)) {
       const pointEl = document.elementFromPoint(x, y);
       const fromPoint = findClosestZone(pointEl);
       if (fromPoint) return fromPoint;
 
       // Final fallback for CS overlay layers: resolve by zone bounds hit test.
-      const candidates = getAllZoneElements().filter(el => {
-        try {
-          const r = el.getBoundingClientRect();
-          return r.width > 0
-            && r.height > 0
-            && x >= r.left
-            && x <= r.right
-            && y >= r.top
-            && y <= r.bottom;
-        } catch (_) {
-          return false;
-        }
-      });
-
-      if (candidates.length) {
-        // Prefer the tightest containing zone when nested boxes overlap.
-        candidates.sort((a, b) => {
-          const ra = a.getBoundingClientRect();
-          const rb = b.getBoundingClientRect();
-          return (ra.width * ra.height) - (rb.width * rb.height);
-        });
-        return candidates[0] || null;
-      }
+      const fallback = pickBestByPoint(getAllZoneElements(), x, y);
+      if (fallback) return fallback;
     }
 
     return null;
@@ -2269,6 +2280,13 @@
   function applyOverride(el, override) {
     appliedOverrideFlag = true;
     try {
+      // Keep a per-element backup so reset can recover even if key matching changes.
+      if (!el.hasAttribute('data-cs-demo-orig-metric')) {
+        el.setAttribute('data-cs-demo-orig-metric', String(el.getAttribute('metric') || ''));
+        if (el.hasAttribute('value')) el.setAttribute('data-cs-demo-orig-value', String(el.getAttribute('value') || ''));
+        if (el.hasAttribute('color')) el.setAttribute('data-cs-demo-orig-color', String(el.getAttribute('color') || ''));
+      }
+
       el.setAttribute('metric', override.metric);
       if (override.value !== undefined && !isNaN(Number(override.value))) {
         el.setAttribute('value', String(override.value));
@@ -2303,6 +2321,13 @@
           const allFrames = Array.from(parentDoc.querySelectorAll('iframe, frame'));
           const idx = allFrames.indexOf(frameEl);
           if (idx >= 0) return `frame:${idx}`;
+
+          // Shadow-rooted compare panes may not be reachable via querySelectorAll.
+          // Fall back to frame element geometry so side-by-side panes stay distinct.
+          const fr = frameEl.getBoundingClientRect();
+          const cx = fr.left + fr.width / 2;
+          const side = cx >= (window.top?.innerWidth || window.innerWidth) / 2 ? 'right' : 'left';
+          return `frame-geom:${Math.round(fr.left)}:${Math.round(fr.top)}:${Math.round(fr.width)}:${Math.round(fr.height)}:${side}`;
         }
       } catch (_) {
         // Cross-origin or restricted parent access.
@@ -2318,17 +2343,33 @@
       const scope = getElementFrameScope(node);
       return scope === 'top' ? base : `${base}|${scope}`;
     };
+    // Always determine side by comparing the pane's bounding rect to the viewport center
     const getHorizontalSide = rect => {
       if (!rect) return 'left';
+      // Use only the current window's innerWidth to avoid cross-origin errors
+      const viewportCenter = window.innerWidth / 2;
       const centerX = Number(rect.left) + Number(rect.width) / 2;
-      return centerX >= (window.innerWidth / 2) ? 'right' : 'left';
+      return centerX > viewportCenter ? 'right' : 'left';
     };
+    // Use the closest compare-pane host (zn-snapshot-header or app-zonings) to determine side
+    const zoneRect = (() => {
+      try {
+        // Prefer the bounding rect of the compare-pane host if available
+        const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header');
+        if (snapshotHost) return snapshotHost.getBoundingClientRect();
+        const zoningsHost = closestAcrossShadow(el, 'app-zonings');
+        if (zoningsHost) return zoningsHost.getBoundingClientRect();
+        return el.getBoundingClientRect();
+      } catch (_) { return null; }
+    })();
+    const zoneSide = getHorizontalSide(zoneRect);
+    const withCompareSide = base => `${base}|cmp-side:${zoneSide}`;
 
     // Compare pages expose snapshot-pane hosts; use their left/right order as
     // the strongest pane identity signal when available.
-    const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header, [class*="zn-snapshot-header"]');
+    const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header');
     if (snapshotHost) {
-      const snapshotHosts = getAllElementsBySelector('zn-snapshot-header, [class*="zn-snapshot-header"]')
+      const snapshotHosts = getAllElementsByTag('zn-snapshot-header')
         .filter(host => {
           if (!(host instanceof Element) || !host.isConnected) return false;
           try {
@@ -2350,7 +2391,7 @@
         });
         const paneIndex = ranked.indexOf(snapshotHost);
         if (paneIndex >= 0) {
-          return withFrameScope(`snapshot-pane:${paneIndex}`, snapshotHost);
+          return withFrameScope(withCompareSide(`snapshot-pane:${paneIndex}`), snapshotHost);
         }
       }
     }
@@ -2378,7 +2419,7 @@
         });
         const paneIndex = ranked.indexOf(zoningsHost);
         if (paneIndex >= 0) {
-          return withFrameScope(`zoning-pane:${paneIndex}`, zoningsHost);
+          return withFrameScope(withCompareSide(`zoning-pane:${paneIndex}`), zoningsHost);
         }
       }
     }
@@ -2394,7 +2435,7 @@
         const sameFullpath = allScrollContainers.filter(c => c.getAttribute('fullpath') === fullpath);
         if (sameFullpath.length > 1) {
           const idx = sameFullpath.indexOf(scrollContainer);
-          return withFrameScope(`fullpath:${fullpath}:${idx}`, scrollContainer);
+          return withFrameScope(withCompareSide(`fullpath:${fullpath}:${idx}`), scrollContainer);
         }
 
         // Shadow-rooted compare panes may hide sibling scroll containers from document.querySelectorAll.
@@ -2403,19 +2444,19 @@
         const isLikelySplitPane = rect.width > 0 && rect.width <= window.innerWidth * 0.75;
         if (isLikelySplitPane) {
           const side = getHorizontalSide(rect);
-          return withFrameScope(`fullpath:${fullpath}:side:${side}`, scrollContainer);
+          return withFrameScope(withCompareSide(`fullpath:${fullpath}:side:${side}`), scrollContainer);
         }
 
-        return withFrameScope(`fullpath:${fullpath}`, scrollContainer);
+        return withFrameScope(withCompareSide(`fullpath:${fullpath}`), scrollContainer);
       }
       const idx = allScrollContainers.indexOf(scrollContainer);
-      if (idx >= 0) return withFrameScope(`scroll:${idx}`, scrollContainer);
+      if (idx >= 0) return withFrameScope(withCompareSide(`scroll:${idx}`), scrollContainer);
     }
 
     // Fallback for unexpected DOM layouts: segment by horizontal position.
     const rect = el.getBoundingClientRect();
     const side = getHorizontalSide(rect);
-    return withFrameScope(`side:${side}`, el);
+    return withFrameScope(withCompareSide(`side:${side}`), el);
   }
 
   function getZoneKey(el) {
@@ -2425,9 +2466,10 @@
     if (!paneKey) return null;
 
     // Hard disambiguation for compare layouts where the same zone id can appear
-    // more than once inside the same pane scope.
+    // in multiple panes/hosts. Use global duplicate indexing so separation does
+    // not depend on pane-key heuristics.
     const duplicates = getAllZoneElements().filter(zoneEl => {
-      return (zoneEl.getAttribute('id') || '') === zoneId && getPaneKey(zoneEl) === paneKey;
+      return (zoneEl.getAttribute('id') || '') === zoneId;
     });
 
     if (duplicates.length <= 1) {
@@ -2957,14 +2999,13 @@
     const id = String(zoneId || '').trim();
     if (!id) return false;
 
-    const paneKeys = new Set();
+    let count = 0;
     getAllZoneElements().forEach(el => {
       if ((el.getAttribute('id') || '') !== id) return;
-      const paneKey = getPaneKey(el) || '';
-      if (paneKey) paneKeys.add(paneKey);
+      count += 1;
     });
 
-    return paneKeys.size > 1;
+    return count > 1;
   }
 
   // Finds the stored override that matches el's current metric context.
@@ -2988,9 +3029,8 @@
       // Legacy: key without metric suffix
       if (overrides[zoneKey]) return { key: zoneKey, override: overrides[zoneKey] };
     }
-    if (zoneId && overrides[zoneId] && !hasDuplicateZoneIdAcrossPanes(zoneId)) {
-      return { key: zoneId, override: overrides[zoneId] };
-    }
+    // Intentionally avoid plain zoneId fallback in compare contexts: raw keys can
+    // bleed edits across panes that share IDs. Pane-scoped keys are authoritative.
     return null;
   }
 
@@ -4042,6 +4082,18 @@
   }
 
   async function saveZoneOverride(el, zoneKey, zoneId, metric, value, zoneName, csTypeName) {
+    const paneKey = getPaneKey(el);
+    const frameScope = window.frameElement ? `${window.frameElement.tagName}#${window.frameElement.id || ''}[${window.frameElement.className || ''}]` : 'top';
+    // TEMP LOG: capture frameScope, paneKey, zoneKey, value
+    if (window.__ZONING_DEBUG_LOG__ !== false) {
+      console.log('[ZONING-DEBUG][saveZoneOverride]', {
+        frameScope,
+        paneKey,
+        zoneKey,
+        value,
+        location: window.location.href
+      });
+    }
     const wrote = upsertZoneOverride(el, zoneKey, zoneId, metric, value, zoneName, csTypeName);
     if (wrote) await persistOverrides();
     closePopover();
@@ -4347,7 +4399,19 @@
       else el.removeAttribute('value');
       if (orig.origColor !== undefined) el.setAttribute('color', String(orig.origColor));
       else el.removeAttribute('color');
+    } else if (el.hasAttribute('data-cs-demo-orig-metric')) {
+      const origMetric = String(el.getAttribute('data-cs-demo-orig-metric') || '');
+      const hasOrigValue = el.hasAttribute('data-cs-demo-orig-value');
+      const hasOrigColor = el.hasAttribute('data-cs-demo-orig-color');
+      el.setAttribute('metric', origMetric);
+      if (hasOrigValue) el.setAttribute('value', String(el.getAttribute('data-cs-demo-orig-value') || ''));
+      else el.removeAttribute('value');
+      if (hasOrigColor) el.setAttribute('color', String(el.getAttribute('data-cs-demo-orig-color') || ''));
+      else el.removeAttribute('color');
     }
+    el.removeAttribute('data-cs-demo-orig-metric');
+    el.removeAttribute('data-cs-demo-orig-value');
+    el.removeAttribute('data-cs-demo-orig-color');
     clearEditedStyle(el);
     if (existing) {
       delete overrides[existing.key];
@@ -4738,8 +4802,21 @@
           if (orig.origColor !== undefined) el.setAttribute('color', String(orig.origColor));
           else el.removeAttribute('color');
         }
-        clearEditedStyle(el);
+      } else if (el.hasAttribute('data-cs-demo-orig-metric')) {
+        const origMetric = String(el.getAttribute('data-cs-demo-orig-metric') || '');
+        const hasOrigValue = el.hasAttribute('data-cs-demo-orig-value');
+        const hasOrigColor = el.hasAttribute('data-cs-demo-orig-color');
+        el.setAttribute('metric', origMetric);
+        if (hasOrigValue) el.setAttribute('value', String(el.getAttribute('data-cs-demo-orig-value') || ''));
+        else el.removeAttribute('value');
+        if (hasOrigColor) el.setAttribute('color', String(el.getAttribute('data-cs-demo-orig-color') || ''));
+        else el.removeAttribute('color');
       }
+
+      el.removeAttribute('data-cs-demo-orig-metric');
+      el.removeAttribute('data-cs-demo-orig-value');
+      el.removeAttribute('data-cs-demo-orig-color');
+      clearEditedStyle(el);
     });
 
     overrides = {};
@@ -6633,6 +6710,26 @@
       const nextOverrides = all[getUrlKey()] || {};
       overrides = { ...nextOverrides };
       log('Storage overrides update received. keys=', Object.keys(overrides).length);
+      // Remove all visual overrides first, but do not trigger storage writes
+      getAllZoneElements().forEach(el => {
+        const zoneKey = getZoneKey(el);
+        const hasOverride = zoneKey && overrides[zoneKey];
+        if (!hasOverride) {
+          // Visual-only reset: revert attributes and styles, but do NOT update storage
+          if (el.hasAttribute('data-cs-demo-orig-metric')) {
+            el.setAttribute('metric', String(el.getAttribute('data-cs-demo-orig-metric') || ''));
+            if (el.hasAttribute('data-cs-demo-orig-value')) el.setAttribute('value', String(el.getAttribute('data-cs-demo-orig-value') || ''));
+            else el.removeAttribute('value');
+            if (el.hasAttribute('data-cs-demo-orig-color')) el.setAttribute('color', String(el.getAttribute('data-cs-demo-orig-color') || ''));
+            else el.removeAttribute('color');
+            el.removeAttribute('data-cs-demo-orig-metric');
+            el.removeAttribute('data-cs-demo-orig-value');
+            el.removeAttribute('data-cs-demo-orig-color');
+          }
+          el.style.outline = '';
+          el.style.outlineOffset = '';
+        }
+      });
       syncZoneWatchers();
       applyAllOverrides();
       updateToolbar();
