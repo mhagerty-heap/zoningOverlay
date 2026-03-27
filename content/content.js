@@ -38,6 +38,7 @@
     'Global zone click fallback'
   ];
   const CS_ZONE_SELECTORS = 'app-zone-elements, app-zone-element';
+  const HEATMAP_LAYER_KEYS = ['clicks', 'moves', 'scrolls', 'attention'];
   const isTopFrame = window.top === window;
   const frameTag = isTopFrame ? 'top' : 'subframe';
 
@@ -207,6 +208,7 @@
   const heatmapAnchorElements = new Map();
   let heatmapPrimaryScrollContainer = null;
   let heatmapNeedsPersist = false;
+  let lastKnownHeatmapLayer = 'clicks';
 
   // ─── STORAGE ─────────────────────────────────────────────────────────────
 
@@ -276,7 +278,14 @@
     return new Promise(resolve => {
       chrome.storage.local.get('csZoningHeatmapPoints', result => {
         const all = result.csZoningHeatmapPoints || {};
-        heatmapPointOverrides = all[getUrlKey()] || {};
+        const raw = all[getUrlKey()] || {};
+        const normalized = {};
+        Object.entries(raw).forEach(([key, point]) => {
+          const nextPoint = normalizeHeatmapPointRecord(point);
+          if (!nextPoint) return;
+          normalized[key] = nextPoint;
+        });
+        heatmapPointOverrides = normalized;
         resolve();
       });
     });
@@ -638,15 +647,71 @@
     return getAllElementsByTag('hj-heatmaps-report').filter(el => !!el && el.isConnected);
   }
 
+  function getHeatmapLayerLabelFromNode(node) {
+    if (!(node instanceof Element)) return '';
+    const isLayerControl = !!(node.matches && node.matches('button, [role="tab"], [role="button"]'));
+    if (!isLayerControl) return '';
+    return layerKeyFromText(node.textContent);
+  }
+
+  function rememberHeatmapLayerFromEvent(event) {
+    if (!event) return;
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+    for (const node of path) {
+      const label = getHeatmapLayerLabelFromNode(node);
+      if (!label) continue;
+      // Avoid accidental updates from unrelated "Clicks/Moves" labels outside heatmap controls.
+      const inHeatmapContext = getActiveAnalysisMode() === 'heatmap' || isLikelyHeatmapView();
+      if (inHeatmapContext) {
+        lastKnownHeatmapLayer = label;
+      }
+      return;
+    }
+  }
+
+  // Extract the canonical layer key from raw button textContent.
+  // Uses first whitespace-delimited token so "clicks 4,521" resolves to "clicks".
+  function layerKeyFromText(raw) {
+    const first = String(raw || '').replace(/\s+/g, ' ').trim().toLowerCase().split(' ')[0];
+    return HEATMAP_LAYER_KEYS.includes(first) ? first : '';
+  }
+
   function getActiveHeatmapLayerName() {
-    const known = ['clicks', 'moves', 'scrolls', 'attention'];
+    // Page-bridge can read inside page-world/shadow DOM reliably. When it captured
+    // a recent layer tab interaction, prefer that value before DOM heuristics.
+    if (HEATMAP_LAYER_KEYS.includes(lastKnownHeatmapLayer)) {
+      return lastKnownHeatmapLayer;
+    }
+
     const candidates = getAllElementsBySelector('button, [role="tab"], [role="button"]');
     const active = candidates.find(el => {
-      const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      return known.includes(text) && isModeElementActive(el);
+      return layerKeyFromText(el.textContent) && isModeElementActive(el);
     });
-    const label = (active?.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-    return known.includes(label) ? label : 'clicks';
+    const label = layerKeyFromText(active?.textContent);
+    if (label) {
+      lastKnownHeatmapLayer = label;
+      return label;
+    }
+
+    const visibleLabels = candidates
+      .map(el => {
+        const key = layerKeyFromText(el.textContent);
+        if (!key) return '';
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden') return '';
+        } catch (_) {
+          // Ignore style resolution failures.
+        }
+        return key;
+      })
+      .filter(Boolean);
+
+    if (visibleLabels.includes(lastKnownHeatmapLayer)) {
+      return lastKnownHeatmapLayer;
+    }
+
+    return visibleLabels[0] || 'clicks';
   }
 
   function isHeatmapEditingContext() {
@@ -1437,7 +1502,7 @@
         };
     if (!rect.width || !rect.height) return null;
 
-    const layer = getActiveHeatmapLayerName();
+    const layer = normalizeHeatmapLayerName(getActiveHeatmapLayerName());
     const surfaceKey = surface ? getHeatmapSurfaceKey(surface) : 'heatmap:unknown';
     const existing = surface ? findNearestHeatmapPoint(surface, clientX, clientY, layer) : null;
     const surfaceScrollLeft = surface ? Number(surface.scrollLeft || 0) : 0;
@@ -1610,10 +1675,46 @@
   function getHeatmapLayerVisualProfile(layer) {
     const key = String(layer || 'clicks').toLowerCase();
     if (key === 'clicks') return { spreadMul: 1.28, blurMul: 1.08, alphaMul: 1.14, stretchY: 1.0 };
-    if (key === 'moves') return { spreadMul: 1.18, blurMul: 1.1, alphaMul: 0.9, stretchY: 1.05 };
+    if (key === 'moves') return { spreadMul: 0.72, blurMul: 0.45, alphaMul: 1.05, stretchY: 1.0 };
     if (key === 'scrolls') return { spreadMul: 1.42, blurMul: 1.2, alphaMul: 0.82, stretchY: 1.22 };
     if (key === 'attention') return { spreadMul: 1.55, blurMul: 1.3, alphaMul: 0.74, stretchY: 1.35 };
     return { spreadMul: 1.28, blurMul: 1.08, alphaMul: 1.14, stretchY: 1.0 };
+  }
+
+  function normalizeHeatmapLayerName(layerRaw, fallback = 'clicks') {
+    const layer = String(layerRaw || '').trim().toLowerCase();
+    if (HEATMAP_LAYER_KEYS.includes(layer)) return layer;
+    return fallback;
+  }
+
+  function getHeatmapLayerLabel(layerRaw) {
+    const layer = normalizeHeatmapLayerName(layerRaw);
+    return layer.charAt(0).toUpperCase() + layer.slice(1);
+  }
+
+  function normalizeHeatmapPointRecord(pointRaw) {
+    if (!pointRaw || typeof pointRaw !== 'object') return null;
+    return {
+      ...pointRaw,
+      layer: normalizeHeatmapLayerName(pointRaw.layer),
+      zoneName: String(pointRaw.zoneName || '').trim()
+    };
+  }
+
+  function getHeatmapPointFallbackName(point) {
+    const metric = String(point?.metric || '').trim();
+    const layerLabel = getHeatmapLayerLabel(point?.layer);
+    const x = Math.round(Number(point?.xPct || 0) * 100);
+    const y = Math.round(Number(point?.yPct || 0) * 100);
+    const base = metric || `${layerLabel} Point`;
+    return `${base} (${x}%, ${y}%)`;
+  }
+
+  function getHeatmapPointDisplayName(point) {
+    const layerLabel = getHeatmapLayerLabel(point?.layer);
+    const customName = String(point?.zoneName || '').trim();
+    const rightSide = customName || getHeatmapPointFallbackName(point);
+    return `${layerLabel} -> ${rightSide}`;
   }
 
   function normalizeHeatmapPointLevel(rawLevel, fallback = 'medium') {
@@ -1624,8 +1725,8 @@
 
   function getHeatmapPointLevelPreset(levelRaw, layerRaw = 'clicks') {
     const level = normalizeHeatmapPointLevel(levelRaw, 'medium');
-    const layer = String(layerRaw || 'clicks').toLowerCase();
-    const isClicks = layer === 'clicks';
+    const layer = normalizeHeatmapLayerName(layerRaw);
+    const isClicks = layer === 'clicks' || layer === 'moves';
 
     if (level === 'high') {
       return {
@@ -1691,6 +1792,7 @@
 
   function buildHeatmapMarkerVisual(point, bounds, layer) {
     const profile = getHeatmapLayerVisualProfile(layer);
+    const layerKey = normalizeHeatmapLayerName(layer, 'clicks');
     const numeric = Number(point?.value);
     const min = Number(bounds?.min);
     const max = Number(bounds?.max);
@@ -1711,7 +1813,8 @@
     // Keep weaker points visible so newly-created points do not look undersized/faded.
     const field = Math.pow(0.32 + normalized * 0.68, 0.76);
 
-    const isClicksLayer = String(layer || '').toLowerCase() === 'clicks';
+    // Moves should share the same High/Medium/Low marker defaults as Clicks.
+    const isClicksLayer = layerKey === 'clicks' || layerKey === 'moves';
     const levelPreset = getHeatmapPointLevelPreset(inferHeatmapPointLevel(point), layer);
     const level = levelPreset.level;
 
@@ -1721,12 +1824,12 @@
 
     const baseRadius = isClicksLayer
       ? (8 + fieldForSize * 8)
-      : (24 + field * 46);
+      : (9 + field * 10);
     const glowRadius = baseRadius * profile.spreadMul;
-    const blur = (isClicksLayer ? (4 + fieldForSize * 6) : (9 + field * 15)) * profile.blurMul;
+    const blur = (isClicksLayer ? (4 + fieldForSize * 6) : (2 + field * 4)) * profile.blurMul;
     const innerSize = isClicksLayer
       ? Math.max(3, 3.2 + fieldForSize * 3.2)
-      : Math.max(8, glowRadius * 0.24);
+      : Math.max(3, glowRadius * 0.28);
 
     const outerAlpha = (isClicksLayer ? (0.34 + field * 0.28) : (0.11 + field * 0.22)) * profile.alphaMul;
     const innerAlpha = (isClicksLayer ? (0.74 + field * 0.22) : (0.16 + field * 0.36)) * profile.alphaMul;
@@ -1770,6 +1873,7 @@
       innerW: Math.round(innerSize * 2),
       innerH: Math.round(innerSize * 2 * profile.stretchY),
       blur: Math.round(blur),
+      mixBlendMode: 'normal',
       outerColor,
       innerColor
     };
@@ -1802,9 +1906,10 @@
       || heatmapView;
     if (!showHeatmapOverlays) return;
 
-    const activeLayer = getActiveHeatmapLayerName();
+    const activeLayer = normalizeHeatmapLayerName(getActiveHeatmapLayerName());
+    const enforceStrictBounds = activeLayer === 'clicks';
     const layerPoints = Object.values(heatmapPointOverrides).filter(point => {
-      if (!point || point.layer !== activeLayer) return false;
+      if (!point || normalizeHeatmapLayerName(point.layer) !== activeLayer) return false;
       const pointFrame = String(point.frameContextKey || (isTopFrame ? 'top' : ''));
       if (!pointFrame) return false;
       if (pointFrame === frameContextKey) return true;
@@ -1848,6 +1953,10 @@
           && pos.y >= clipRect.top
           && pos.y <= clipRect.bottom;
       };
+      const isRenderablePosition = pos => {
+        if (!enforceStrictBounds) return true;
+        return isInsideSurfaceBounds(pos) && isInsideClipBounds(pos);
+      };
 
       const trackingEl = trackingElForClip;
       const trackingOffsetX = Number(point.trackingOffsetX);
@@ -1858,7 +1967,7 @@
           x: trackingRect.left + trackingOffsetX,
           y: trackingRect.top + trackingOffsetY
         };
-        if (!isInsideSurfaceBounds(pos) || !isInsideClipBounds(pos)) return;
+        if (!isRenderablePosition(pos)) return;
         viewportEntries.push({ point, pos });
         return;
       }
@@ -1874,7 +1983,7 @@
         const py = Number(point.pageY) - Number(window.scrollY || 0);
         if (Number.isFinite(px) && Number.isFinite(py) && Number.isFinite(dx) && Number.isFinite(dy)) {
           const pos = { x: px + dx, y: py + dy };
-          if (!isInsideSurfaceBounds(pos) || !isInsideClipBounds(pos)) return;
+          if (!isRenderablePosition(pos)) return;
           viewportEntries.push({ point, pos });
           return;
         }
@@ -1925,7 +2034,7 @@
       const pos = getHeatmapPointClientPosition(point, null, rect, anchor);
       if (!pos) return;
       if (!Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.y))) return;
-      if (!isInsideSurfaceBounds(pos) || !isInsideClipBounds(pos)) return;
+      if (!isRenderablePosition(pos)) return;
       viewportEntries.push({ point, pos });
     });
 
@@ -1970,6 +2079,20 @@
     }
   }
 
+  function clearHeatmapPointOverlaysNow() {
+    heatmapSurfaceOverlays.forEach((shadow, surface) => {
+      if (!surface.isConnected) {
+        if (shadow._host?.isConnected) shadow._host.remove();
+        heatmapSurfaceOverlays.delete(surface);
+      } else {
+        shadow.innerHTML = '';
+      }
+    });
+
+    const viewportShadow = ensureHeatmapOverlayHost();
+    if (viewportShadow) viewportShadow.innerHTML = '';
+  }
+
   let heatmapOverlayRaf = 0;
   let heatmapFollowUntil = 0;
   function scheduleHeatmapOverlayRender() {
@@ -1993,7 +2116,7 @@
       frameContextKey: String(editorState.frameContextKey || point.frameContextKey || frameContextKey),
       pointId: point.pointId,
       surfaceKey: point.surfaceKey,
-      layer: point.layer,
+      layer: normalizeHeatmapLayerName(point.layer),
       xPct: Number(point.xPct),
       yPct: Number(point.yPct),
       anchorKey: String(point.anchorKey || ''),
@@ -2021,7 +2144,7 @@
       centerColor: String(options.centerColor || point.centerColor || '#ee3a32'),
       metric,
       value,
-      zoneName: zoneName || ''
+      zoneName: String(zoneName || point.zoneName || '').trim()
     };
     await persistHeatmapPointOverrides();
     renderHeatmapPointOverlays();
@@ -2168,7 +2291,6 @@
   }
 
   function getPaneKey(el) {
-    const scrollContainer = closestAcrossShadow(el, 'app-heatmap-scroll-element');
     const getElementFrameScope = node => {
       const doc = node?.ownerDocument || document;
       const win = doc.defaultView;
@@ -2196,6 +2318,72 @@
       const scope = getElementFrameScope(node);
       return scope === 'top' ? base : `${base}|${scope}`;
     };
+    const getHorizontalSide = rect => {
+      if (!rect) return 'left';
+      const centerX = Number(rect.left) + Number(rect.width) / 2;
+      return centerX >= (window.innerWidth / 2) ? 'right' : 'left';
+    };
+
+    // Compare pages expose snapshot-pane hosts; use their left/right order as
+    // the strongest pane identity signal when available.
+    const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header, [class*="zn-snapshot-header"]');
+    if (snapshotHost) {
+      const snapshotHosts = getAllElementsBySelector('zn-snapshot-header, [class*="zn-snapshot-header"]')
+        .filter(host => {
+          if (!(host instanceof Element) || !host.isConnected) return false;
+          try {
+            const r = host.getBoundingClientRect();
+            return r.width > 0 && r.height > 0;
+          } catch (_) {
+            return false;
+          }
+        });
+
+      if (snapshotHosts.length > 1) {
+        const ranked = [...snapshotHosts].sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          if (Math.round(ra.left) !== Math.round(rb.left)) return Math.round(ra.left) - Math.round(rb.left);
+          if (Math.round(ra.top) !== Math.round(rb.top)) return Math.round(ra.top) - Math.round(rb.top);
+          if (Math.round(ra.width) !== Math.round(rb.width)) return Math.round(ra.width) - Math.round(rb.width);
+          return Math.round(ra.height) - Math.round(rb.height);
+        });
+        const paneIndex = ranked.indexOf(snapshotHost);
+        if (paneIndex >= 0) {
+          return withFrameScope(`snapshot-pane:${paneIndex}`, snapshotHost);
+        }
+      }
+    }
+
+    const zoningsHost = closestAcrossShadow(el, 'app-zonings');
+    if (zoningsHost) {
+      const visibleHosts = getAllElementsByTag('app-zonings').filter(host => {
+        if (!(host instanceof Element) || !host.isConnected) return false;
+        try {
+          const r = host.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        } catch (_) {
+          return false;
+        }
+      });
+
+      if (visibleHosts.length > 1) {
+        const ranked = [...visibleHosts].sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          if (Math.round(ra.left) !== Math.round(rb.left)) return Math.round(ra.left) - Math.round(rb.left);
+          if (Math.round(ra.top) !== Math.round(rb.top)) return Math.round(ra.top) - Math.round(rb.top);
+          if (Math.round(ra.width) !== Math.round(rb.width)) return Math.round(ra.width) - Math.round(rb.width);
+          return Math.round(ra.height) - Math.round(rb.height);
+        });
+        const paneIndex = ranked.indexOf(zoningsHost);
+        if (paneIndex >= 0) {
+          return withFrameScope(`zoning-pane:${paneIndex}`, zoningsHost);
+        }
+      }
+    }
+
+    const scrollContainer = closestAcrossShadow(el, 'app-heatmap-scroll-element');
 
     if (scrollContainer) {
       const fullpath = scrollContainer.getAttribute('fullpath');
@@ -2214,8 +2402,8 @@
         const rect = scrollContainer.getBoundingClientRect();
         const isLikelySplitPane = rect.width > 0 && rect.width <= window.innerWidth * 0.75;
         if (isLikelySplitPane) {
-          const bucket = Math.floor(Math.max(0, rect.left) / Math.max(1, window.innerWidth / 3));
-          return withFrameScope(`fullpath:${fullpath}:xbucket:${bucket}`, scrollContainer);
+          const side = getHorizontalSide(rect);
+          return withFrameScope(`fullpath:${fullpath}:side:${side}`, scrollContainer);
         }
 
         return withFrameScope(`fullpath:${fullpath}`, scrollContainer);
@@ -2226,8 +2414,8 @@
 
     // Fallback for unexpected DOM layouts: segment by horizontal position.
     const rect = el.getBoundingClientRect();
-    const bucket = Math.floor(Math.max(0, rect.left) / Math.max(1, window.innerWidth / 3));
-    return withFrameScope(`xbucket:${bucket}`, el);
+    const side = getHorizontalSide(rect);
+    return withFrameScope(`side:${side}`, el);
   }
 
   function getZoneKey(el) {
@@ -2765,6 +2953,20 @@
     return `${base} ${existingOfBase + 1}`;
   }
 
+  function hasDuplicateZoneIdAcrossPanes(zoneId) {
+    const id = String(zoneId || '').trim();
+    if (!id) return false;
+
+    const paneKeys = new Set();
+    getAllZoneElements().forEach(el => {
+      if ((el.getAttribute('id') || '') !== id) return;
+      const paneKey = getPaneKey(el) || '';
+      if (paneKey) paneKeys.add(paneKey);
+    });
+
+    return paneKeys.size > 1;
+  }
+
   // Finds the stored override that matches el's current metric context.
   // A match exists when the zone's current metric equals either ov.metric (override applied)
   // or ov.origMetric (override cleared / not yet applied). This means overrides from a
@@ -2786,13 +2988,16 @@
       // Legacy: key without metric suffix
       if (overrides[zoneKey]) return { key: zoneKey, override: overrides[zoneKey] };
     }
-    if (zoneId && overrides[zoneId]) return { key: zoneId, override: overrides[zoneId] };
+    if (zoneId && overrides[zoneId] && !hasDuplicateZoneIdAcrossPanes(zoneId)) {
+      return { key: zoneId, override: overrides[zoneId] };
+    }
     return null;
   }
 
   function buildEditorState(zoneEl) {
     const zoneId = zoneEl.getAttribute('id') || '';
-    const zoneKey = getZoneKey(zoneEl) || zoneId;
+    const paneKey = getPaneKey(zoneEl) || '';
+    const zoneKey = getZoneKey(zoneEl) || (zoneId && paneKey ? `${paneKey}::${zoneId}` : zoneId);
     const currentMetric = zoneEl.getAttribute('metric') || '';
     const currentValue = zoneEl.getAttribute('value') || String(parseFloat(currentMetric) || 0);
     const existing = getOverrideForElement(zoneEl);
@@ -2894,7 +3099,11 @@
   }
 
   function upsertZoneOverride(el, zoneKey, zoneId, metric, value, zoneName, csTypeName) {
-    if (!zoneKey) return false;
+    const fallbackPaneKey = getPaneKey(el) || '';
+    const resolvedZoneKey = (zoneKey && zoneKey !== zoneId)
+      ? zoneKey
+      : ((zoneId && fallbackPaneKey) ? `${fallbackPaneKey}::${zoneId}` : zoneKey);
+    if (!resolvedZoneKey) return false;
 
     const existing = getOverrideForElement(el);
     const existingOv = existing?.override || null;
@@ -2905,18 +3114,19 @@
     const origColor = rawOrigColor === null ? undefined : rawOrigColor;
 
     // Remove any old-format keys for this zone.
-    if (existing && existing.key !== getMetricBasedKey(zoneKey, origMetric)) {
+    if (existing && existing.key !== getMetricBasedKey(resolvedZoneKey, origMetric)) {
       delete overrides[existing.key];
     }
-    if (overrides[zoneKey]) delete overrides[zoneKey]; // legacy no-metric key
-    if (zoneId && zoneId !== zoneKey && overrides[zoneId]) delete overrides[zoneId];
+    if (overrides[resolvedZoneKey]) delete overrides[resolvedZoneKey]; // legacy no-metric key
+    if (zoneId && zoneId !== resolvedZoneKey && overrides[zoneId]) delete overrides[zoneId];
 
     const resolvedTypeName = csTypeName || csMetricTypeName || '';
     const finalName = zoneName || existingOv?.zoneName || generateDefaultZoneName(origMetric, resolvedTypeName);
-    const newKey = getMetricBasedKey(zoneKey, origMetric);
+    const newKey = getMetricBasedKey(resolvedZoneKey, origMetric);
     overrides[newKey] = { metric, value, origMetric, origValue, origColor, zoneName: finalName, csMetricTypeName: resolvedTypeName };
     log('Persisting override', {
       requestedZoneKey: zoneKey,
+      resolvedZoneKey,
       savedKey: newKey,
       zoneId,
       metric,
@@ -3463,6 +3673,10 @@
       <div class="zone-id">FRAME: ${editorState.frameContextKey || '(unknown)'}</div>
       ${isHeatmapPointEditor ? `
         <div class="field">
+          <label>${objectLabel} <span class="hint">${objectHint}</span></label>
+          <input id="inp-zone-name" type="text" value="${existingZoneName}" placeholder="e.g. Checkout CTA Click Cluster">
+        </div>
+        <div class="field">
           <label>Data Point Type <span class="hint">(only setting required)</span></label>
           <div class="level-grid">
             <button class="level-btn" type="button" data-level="low">Low</button>
@@ -3718,8 +3932,9 @@
     applyButton.addEventListener('click', () => {
       if (editorState.kind === 'heatmap-point') {
         const preset = getHeatmapPointLevelPreset(selectedPointLevel, heatmapLayer);
+        const zoneName = zoneNameInput?.value?.trim() || '';
         log('Apply override requested', zoneKey, 'level=', preset.level, 'value=', preset.value);
-        saveHeatmapPointOverride(editorState, preset.metric, preset.value, '', {
+        saveHeatmapPointOverride(editorState, preset.metric, preset.value, zoneName, {
           level: preset.level,
           centerColor: preset.centerColor
         });
@@ -3761,6 +3976,16 @@
       if (!inp) return;
       inp.addEventListener('keydown', e => {
         if (e.key === 'Enter') {
+          if (editorState.kind === 'heatmap-point') {
+            const preset = getHeatmapPointLevelPreset(selectedPointLevel, heatmapLayer);
+            const zoneName = zoneNameInput?.value?.trim() || '';
+            saveHeatmapPointOverride(editorState, preset.metric, preset.value, zoneName, {
+              level: preset.level,
+              centerColor: preset.centerColor
+            });
+            return;
+          }
+
           const metric = metricInput.value.trim();
           const value = parseFloat(valueInput.value);
           const zoneName = zoneNameInput?.value?.trim() || '';
@@ -4148,9 +4373,16 @@
       return { overrides: { ...raw }, heatmapPoints: {} };
     }
 
+    const normalizedHeatmapPoints = {};
+    Object.entries(raw.heatmapPoints || {}).forEach(([key, point]) => {
+      const nextPoint = normalizeHeatmapPointRecord(point);
+      if (!nextPoint) return;
+      normalizedHeatmapPoints[key] = nextPoint;
+    });
+
     return {
       overrides: { ...(raw.overrides || {}) },
-      heatmapPoints: { ...(raw.heatmapPoints || {}) }
+      heatmapPoints: normalizedHeatmapPoints
     };
   }
 
@@ -4212,7 +4444,7 @@
   }
 
   function getLayerKeys() {
-    return ['clicks', 'moves', 'scrolls', 'attention'];
+    return [...HEATMAP_LAYER_KEYS];
   }
 
   function getLayerScenarioSummary(scenario) {
@@ -5142,6 +5374,14 @@
         border-top: 1px solid #eee;
         margin: 12px 0;
       }
+      .subsection-label {
+        font-size: 10px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #9a9ab0;
+        margin: 8px 0 6px;
+      }
     `);
     shadow.adoptedStyleSheets = [sheet];
 
@@ -5156,16 +5396,25 @@
       return rawName || key.split('::').pop() || key;
     }
 
-    function getHeatmapEditName(point, key) {
-      const layer = String(point?.layer || 'clicks');
-      const metric = String(point?.metric || '').trim();
-      const label = metric || `${layer} point`;
-      return `${label} (${Math.round(Number(point?.xPct || 0) * 100)}%, ${Math.round(Number(point?.yPct || 0) * 100)}%)`;
+    function getHeatmapEditMeta(point) {
+      const value = Number(point?.value);
+      const valueLabel = Number.isFinite(value) ? value.toFixed(1) : '?';
+      const x = Math.round(Number(point?.xPct || 0) * 100);
+      const y = Math.round(Number(point?.yPct || 0) * 100);
+      return `value ${valueLabel} @ ${x}%, ${y}%`;
     }
 
     function renderPanel() {
       const zoningEntries = Object.entries(overrides);
       const heatmapEntries = Object.entries(heatmapPointOverrides);
+      const heatmapEntriesByLayer = HEATMAP_LAYER_KEYS.map(layer => {
+        const points = heatmapEntries.filter(([, point]) => normalizeHeatmapLayerName(point?.layer) === layer);
+        return {
+          layer,
+          label: getHeatmapLayerLabel(layer),
+          points
+        };
+      });
       const total = zoningEntries.length + heatmapEntries.length;
 
       const panel = document.createElement('div');
@@ -5190,13 +5439,19 @@
           <div class="list" id="heatmap-list">
             ${heatmapEntries.length === 0
               ? '<div class="empty">No heatmap edits</div>'
-              : heatmapEntries.map(([key, point]) => `
-                <div class="item">
-                  <span class="name" title="${escHtml(key)}">${escHtml(getHeatmapEditName(point, key))}</span>
-                  <span class="meta">${escHtml(String(point?.layer || 'clicks'))}</span>
-                  <button class="btn-del" data-kind="heatmap" data-key="${escHtml(key)}">Delete</button>
-                </div>
-              `).join('')}
+              : heatmapEntriesByLayer.map(({ label, points }) => {
+                if (points.length === 0) return '';
+                return `
+                  <div class="subsection-label">${escHtml(label)}</div>
+                  ${points.map(([key, point]) => `
+                    <div class="item">
+                      <span class="name" title="${escHtml(key)}">${escHtml(getHeatmapPointDisplayName(point))}</span>
+                      <span class="meta">${escHtml(getHeatmapEditMeta(point))}</span>
+                      <button class="btn-del" data-kind="heatmap" data-key="${escHtml(key)}">Delete</button>
+                    </div>
+                  `).join('')}
+                `;
+              }).join('')}
           </div>
         </div>
       `;
@@ -6076,6 +6331,21 @@
 
   window.addEventListener('cs-demo-page-interaction', event => {
     const detail = event?.detail || {};
+    const explicitLayer = normalizeHeatmapLayerName(detail.heatmapLayer || '', '');
+    if (explicitLayer && explicitLayer !== lastKnownHeatmapLayer) {
+      lastKnownHeatmapLayer = explicitLayer;
+      log('Heatmap layer remembered via page-bridge', explicitLayer, `editMode=${editMode}`, `uiVisible=${uiVisible}`);
+      // Make layer switches feel immediate by hiding stale markers first,
+      // then redraw on the next animation frame.
+      clearHeatmapPointOverlaysNow();
+      scheduleHeatmapOverlayRender();
+    }
+
+    // Layer tab clicks should not go through full zone/heatmap fallback logic.
+    if (explicitLayer && !detail.zoneId && !detail.heatmapSurface) {
+      return;
+    }
+
     if (!editMode || !uiVisible) return;
 
     const source = String(detail.source || detail.eventType || 'unknown');
@@ -6144,6 +6414,7 @@
 
   // Intercept zone clicks globally so edit mode works even if zone hosts are replaced dynamically.
   let lastZoneInterceptAt = 0;
+  const seenGlobalInteractionEvents = new WeakSet();
 
   function stopEventCompletely(event) {
     if (!event) return;
@@ -6153,6 +6424,31 @@
   }
 
   function handleGlobalZoneInteraction(event, source) {
+    if (event && typeof event === 'object') {
+      if (seenGlobalInteractionEvents.has(event)) return;
+      seenGlobalInteractionEvents.add(event);
+    }
+
+    if (!editMode || !uiVisible) return;
+
+    const path = event.composedPath ? event.composedPath() : [];
+    const zoneEl = findZoneElementFromEvent(event);
+
+    // Heatmap layer tabs are handled by page-bridge; bail out early to avoid
+    // running expensive context resolution on every tab pointer/mouse event.
+    // Important: do not bail if this interaction actually hit a zoning element.
+    const layerFromPath = path
+      .map(node => getHeatmapLayerLabelFromNode(node))
+      .find(Boolean);
+    if (layerFromPath && !zoneEl) {
+      if (layerFromPath !== lastKnownHeatmapLayer) {
+        lastKnownHeatmapLayer = layerFromPath;
+        clearHeatmapPointOverlaysNow();
+        scheduleHeatmapOverlayRender();
+      }
+      return;
+    }
+
     log(
       'Global zone interaction',
       `source=${source}`,
@@ -6162,9 +6458,6 @@
       `active=${editMode && uiVisible}`
     );
 
-    if (!editMode || !uiVisible) return;
-
-    const path = event.composedPath ? event.composedPath() : [];
     const heatmapEditingContext = CS_ENABLE_HEATMAP_INTERACTIONS && isHeatmapEditingContext();
     const zoningInteractionContext = isLikelyZoningInteractionContext(path);
     const pathPreview = path
@@ -6206,7 +6499,6 @@
       if (!node.matches) return false;
       return node.matches('[data-cs-qa-id="heatmap-report-container"], [data-qa-id="heatmap-report-container"], [id*="layers-container"], [class*="layers-container"], [class*="heatmap-layer"], [data-testid*="heatmap-layer"]');
     }) || null;
-    const zoneEl = findZoneElementFromEvent(event);
     if (zoneEl) {
       log(
         'Global zone match',
@@ -6302,7 +6594,7 @@
   }
 
   // Register on both window and document so we can win even if CS listens at window capture.
-  ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click', 'contextmenu'].forEach(type => {
+  ['pointerdown', 'click', 'contextmenu'].forEach(type => {
     window.addEventListener(type, e => handleGlobalZoneInteraction(e, type), true);
     document.addEventListener(type, e => handleGlobalZoneInteraction(e, type), true);
   });
@@ -6348,7 +6640,13 @@
     if (changes.csZoningHeatmapPoints) {
       const all = changes.csZoningHeatmapPoints.newValue || {};
       const nextPoints = all[getUrlKey()] || {};
-      heatmapPointOverrides = { ...nextPoints };
+      const normalized = {};
+      Object.entries(nextPoints).forEach(([key, point]) => {
+        const nextPoint = normalizeHeatmapPointRecord(point);
+        if (!nextPoint) return;
+        normalized[key] = nextPoint;
+      });
+      heatmapPointOverrides = normalized;
       log('Storage heatmap-point update received. keys=', Object.keys(heatmapPointOverrides).length);
       renderHeatmapPointOverlays();
       updateToolbar();
