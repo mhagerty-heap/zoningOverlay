@@ -3288,11 +3288,26 @@
     });
 
     log('Zone watcher sync complete. zones=', zones.length, 'watchers=', zoneObservers.size);
+    // (Removed repeated applyAllOverrides to prevent infinite logging)
   }
 
   function applyAllOverrides() {
-    getAllZoneElements().forEach(el => {
+    const zoneElements = getAllZoneElements();
+    if (window.__ZONING_DEBUG_LOG__ !== false) {
+      console.log('[ZONING-DEBUG][applyAllOverrides] zoneElements.length:', zoneElements.length);
+    }
+    zoneElements.forEach(el => {
+      const key = getZoneKey(el);
       const existing = getOverrideForElement(el);
+      if (window.__ZONING_DEBUG_LOG__ !== false) {
+        console.log('[ZONING-DEBUG][applyAllOverrides]', {
+          el,
+          key,
+          hasOverride: !!existing,
+          override: existing?.override,
+          allOverrideKeys: Object.keys(overrides)
+        });
+      }
       if (existing) applyOverride(el, existing.override);
     });
   }
@@ -6779,6 +6794,31 @@
   });
 
   async function init() {
+        // MutationObserver: apply overrides when zone elements appear
+        let observer = null;
+        function checkAndApplyOverrides() {
+          const zoneElements = getAllZoneElements();
+          if (zoneElements.length > 0) {
+            const domKeys = zoneElements.map(getZoneKey).filter(Boolean);
+            console.log('[ZONING-DEBUG][observer] DOM zone keys:', domKeys);
+            console.log('[ZONING-DEBUG][observer] Loaded override keys:', Object.keys(overrides));
+            applyAllOverrides();
+            if (observer) observer.disconnect();
+          }
+        }
+        function startObserverWhenBodyReady() {
+          if (document.body) {
+            observer = new MutationObserver(() => {
+              checkAndApplyOverrides();
+            });
+            observer.observe(document.body, { childList: true, subtree: true });
+            // In case elements are already present
+            checkAndApplyOverrides();
+          } else {
+            setTimeout(startObserverWhenBodyReady, 50);
+          }
+        }
+        startObserverWhenBodyReady();
     log('Global zone interaction', `init frame=${frameTag}`, `url=${location.href}`);
     log('Initializing content script. url=', location.href, 'origin=', location.origin, 'readyState=', document.readyState);
     try {
@@ -6799,7 +6839,9 @@
     await loadGlobalEditMode();
     await loadUiVisibility();
     await loadOverrides();
+    console.log('[ZONING-DEBUG][init] Loaded overrides:', Object.keys(overrides));
     await loadHeatmapPointOverrides();
+    console.log('[ZONING-DEBUG][init] Loaded heatmapPointOverrides:', Object.keys(heatmapPointOverrides));
     startDocObserver();
 
     // Start watching existing zones + create toolbar
@@ -6807,6 +6849,9 @@
     createToolbar();
     applyUiVisibility();
     renderHeatmapPointOverlays();
+    // Debug: log after applying all overrides
+    applyAllOverrides();
+    console.log('[ZONING-DEBUG][init] Called applyAllOverrides after page load.');
     window.addEventListener('resize', scheduleHeatmapOverlayRender, true);
     window.addEventListener('scroll', scheduleHeatmapOverlayRender, true);
     document.addEventListener('scroll', scheduleHeatmapOverlayRender, true);
