@@ -66,8 +66,11 @@
       // Cross-origin or restricted parent access.
     }
 
-    // CORE FIX: Strip location.hash because CS injects changing JWT tokens here
-    return `sub:${location.origin}${location.pathname}`;
+    // CORE FIX: Include stable query params and window.name to differentiate 
+    // side-by-side panes without relying on the volatile JWT hash.
+    const search = location.search || '';
+    const frameName = window.name ? `|name:${window.name}` : '';
+    return `sub:${location.origin}${location.pathname}${search}${frameName}`;
   }
 
 
@@ -2330,16 +2333,22 @@
           const idx = allFrames.indexOf(frameEl);
           if (idx >= 0) return `frame:${idx}`;
 
+          // Shadow-rooted compare panes may not be reachable via querySelectorAll.
+          // Fall back to frame element geometry so side-by-side panes stay distinct.
           const fr = frameEl.getBoundingClientRect();
           const cx = fr.left + fr.width / 2;
           const side = cx >= (window.top?.innerWidth || window.innerWidth) / 2 ? 'right' : 'left';
           return `frame-geom:${Math.round(fr.left)}:${Math.round(fr.top)}:${Math.round(fr.width)}:${Math.round(fr.height)}:${side}`;
         }
-      } catch (_) {}
+      } catch (_) {
+        // Cross-origin or restricted parent access.
+      }
 
       try {
-        // CORE FIX: Strip win.location.hash here as well
-        return `sub:${win.location.origin}${win.location.pathname}`;
+        // CORE FIX: Include stable query params and window.name here as well
+        const search = win.location.search || '';
+        const frameName = win.name ? `|name:${win.name}` : '';
+        return `sub:${win.location.origin}${win.location.pathname}${search}${frameName}`;
       } catch (_) {
         return frameScopeKey;
       }
@@ -2350,15 +2359,19 @@
       return scope === 'top' ? base : `${base}|${scope}`;
     };
     
+    // Always determine side by comparing the pane's bounding rect to the viewport center
     const getHorizontalSide = rect => {
       if (!rect) return 'left';
+      // Use only the current window's innerWidth to avoid cross-origin errors
       const viewportCenter = window.innerWidth / 2;
       const centerX = Number(rect.left) + Number(rect.width) / 2;
       return centerX > viewportCenter ? 'right' : 'left';
     };
     
+    // Use the closest compare-pane host (zn-snapshot-header or app-zonings) to determine side
     const zoneRect = (() => {
       try {
+        // Prefer the bounding rect of the compare-pane host if available
         const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header');
         if (snapshotHost) return snapshotHost.getBoundingClientRect();
         const zoningsHost = closestAcrossShadow(el, 'app-zonings');
@@ -2366,10 +2379,11 @@
         return el.getBoundingClientRect();
       } catch (_) { return null; }
     })();
-    
     const zoneSide = getHorizontalSide(zoneRect);
     const withCompareSide = base => `${base}|cmp-side:${zoneSide}`;
 
+    // Compare pages expose snapshot-pane hosts; use their left/right order as
+    // the strongest pane identity signal when available.
     const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header');
     if (snapshotHost) {
       const snapshotHosts = getAllElementsByTag('zn-snapshot-header')
@@ -2428,27 +2442,35 @@
     }
 
     const scrollContainer = closestAcrossShadow(el, 'app-heatmap-scroll-element');
+
     if (scrollContainer) {
       const fullpath = scrollContainer.getAttribute('fullpath');
       const allScrollContainers = getAllElementsByTag('app-heatmap-scroll-element');
       if (fullpath) {
+        // In split-screen comparison mode, both panes share the same fullpath.
+        // Append the pane index so overrides are scoped per pane independently.
         const sameFullpath = allScrollContainers.filter(c => c.getAttribute('fullpath') === fullpath);
         if (sameFullpath.length > 1) {
           const idx = sameFullpath.indexOf(scrollContainer);
           return withFrameScope(withCompareSide(`fullpath:${fullpath}:${idx}`), scrollContainer);
         }
+
+        // Shadow-rooted compare panes may hide sibling scroll containers from document.querySelectorAll.
+        // Detect a split layout by container width and add a horizontal bucket discriminator.
         const rect = scrollContainer.getBoundingClientRect();
         const isLikelySplitPane = rect.width > 0 && rect.width <= window.innerWidth * 0.75;
         if (isLikelySplitPane) {
           const side = getHorizontalSide(rect);
           return withFrameScope(withCompareSide(`fullpath:${fullpath}:side:${side}`), scrollContainer);
         }
+
         return withFrameScope(withCompareSide(`fullpath:${fullpath}`), scrollContainer);
       }
       const idx = allScrollContainers.indexOf(scrollContainer);
       if (idx >= 0) return withFrameScope(withCompareSide(`scroll:${idx}`), scrollContainer);
     }
 
+    // Fallback for unexpected DOM layouts: segment by horizontal position.
     const rect = el.getBoundingClientRect();
     const side = getHorizontalSide(rect);
     return withFrameScope(withCompareSide(`side:${side}`), el);
@@ -2737,79 +2759,60 @@
   //  2. Known CS DOM selectors for the active metric pill / dropdown button
   //  3. Text-scan of the page for known CS metric names
   // Returns an empty string when nothing can be found.
-  function readCsMetricTypeName() {
-    if (!isTopFrame) return csMetricTypeName; // subframes reuse whatever top-frame cached
+  function readCsMetricTypeName(paneSide = 'left') {
+    if (!isTopFrame) return csMetricTypeName; 
 
-    // ── Strategy 1: URL hash query param ────────────────────────────────────
-    try {
-      const hash = location.hash || '';
-      const qIdx = hash.indexOf('?');
-      if (qIdx !== -1) {
-        const params = new URLSearchParams(hash.slice(qIdx + 1));
-        const raw = params.get('metric') || params.get('indicator') || params.get('kpi') || '';
-        if (raw) {
-          // Convert snake_case / kebab-case to Title Case
-          const titled = raw.replace(/[-_]+/g, ' ')
-            .replace(/\b\w/g, c => c.toUpperCase());
-          log('CS metric from URL param:', titled);
-          return titled;
+    const isRightTarget = paneSide === 'right';
+    const center = window.innerWidth / 2;
+
+    // SPATIAL DOM MATH: Filters elements based on left/right screen halves
+    function isCorrectSide(el) {
+      if (!el || !el.getBoundingClientRect) return false;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0) return false;
+      const elIsRight = (rect.left + rect.width / 2) > center;
+      return elIsRight === isRightTarget;
+    }
+
+    if (!isRightTarget) {
+      try {
+        const hash = location.hash || '';
+        const qIdx = hash.indexOf('?');
+        if (qIdx !== -1) {
+          const params = new URLSearchParams(hash.slice(qIdx + 1));
+          const raw = params.get('metric') || params.get('indicator') || params.get('kpi') || '';
+          if (raw) return raw.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
         }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    }
 
-    // ── Strategy 2: CS DOM selectors ─────────────────────────────────────────
     const domSelectors = [
-      // Direct metric selector trigger (from CS dropdown itself)
-      'div.metric-selector-trigger span',
-      'div[class*="metric-selector-trigger"] span',
-      'csm-universal-select[class*="metric-selector"] span',
-      '[class*="metric-selector"] [class*="active"]',
-      '[class*="metric-selector"] [aria-selected="true"]',
-      '[class*="kpi-selector"] [class*="selected"]',
-      '[class*="kpi-selector"] [aria-selected="true"]',
-      '[class*="metric-dropdown"] [class*="trigger"]',
-      '[class*="metric-dropdown"] button',
-      '[class*="metrics"] [class*="active"]',
-      '[class*="indicators"] [class*="active"]',
-      'cq-metric-selector [selected]',
-      'cq-metric-selector [active]',
-      '[role="option"][aria-selected="true"]',
-      '[role="tab"][aria-selected="true"]',
+      'div.metric-selector-trigger span', 'div[class*="metric-selector-trigger"] span',
+      'csm-universal-select[class*="metric-selector"] span', '[class*="metric-selector"] [class*="active"]',
+      '[class*="metric-selector"] [aria-selected="true"]', '[class*="kpi-selector"] [class*="selected"]',
+      '[class*="kpi-selector"] [aria-selected="true"]', '[class*="metric-dropdown"] [class*="trigger"]',
+      '[class*="metric-dropdown"] button', '[class*="metrics"] [class*="active"]',
+      '[class*="indicators"] [class*="active"]', 'cq-metric-selector [selected]',
+      'cq-metric-selector [active]', '[role="option"][aria-selected="true"]', '[role="tab"][aria-selected="true"]'
     ];
 
     const knownMetricNames = [
-      'Click Rate', 'Attractiveness Rate', 'Engagement Rate',
-      'Exposure Rate', 'Activity Rate', 'Conversion Rate',
-      'Revenue', 'Transactions', 'Revenue per Session',
-      'Time on Page', 'Scroll Depth', 'Bounce Rate',
-      'Page Views', 'Sessions', 'Unique Visitors',
-      'Add to Cart Rate', 'Product Detail Views',
+      'Click Rate', 'Attractiveness Rate', 'Engagement Rate', 'Exposure Rate', 'Activity Rate', 'Conversion Rate',
+      'Revenue', 'Transactions', 'Revenue per Session', 'Time on Page', 'Scroll Depth', 'Bounce Rate',
+      'Page Views', 'Sessions', 'Unique Visitors', 'Add to Cart Rate', 'Product Detail Views'
     ];
-    const knownLower = knownMetricNames.map(n => n.toLowerCase());
 
     function normalizeCandidate(text) {
       const raw = normalizeMetricTypeName(text);
       if (!raw) return '';
-
-      // Prefer canonical known labels if they appear in a noisy string.
       const lower = raw.toLowerCase();
       const known = knownMetricNames.find(name => lower.includes(name.toLowerCase()));
       if (known) return known;
-
-      // Heuristic fallback for unseen metric labels.
-      // Reject obvious value strings (numbers, %, currency-heavy).
-      if (/^[\d\s.,%$€£¥-]+$/.test(raw)) return '';
-      if (/\d/.test(raw) && /[%$€£¥]/.test(raw)) return '';
-      if (raw.length > 64) return '';
-
-      // Keep likely metric-like labels.
-      if (/(rate|revenue|transaction|session|page view|visitor|bounce|scroll|engagement|attractiveness|activity|exposure|conversion|cart|time)/i.test(raw)) {
-        return raw;
-      }
+      if (/^[\d\s.,%$€£¥-]+$/.test(raw) || (/\d/.test(raw) && /[%$€£¥]/.test(raw)) || raw.length > 64) return '';
+      if (/(rate|revenue|transaction|session|page view|visitor|bounce|scroll|engagement|attractiveness|activity|exposure|conversion|cart|time)/i.test(raw)) return raw;
       return '';
     }
 
-    // Deep query that walks open shadow roots.
     function queryAllDeep(selector, root = document, out = []) {
       if (!root || !root.querySelectorAll) return out;
       root.querySelectorAll(selector).forEach(el => out.push(el));
@@ -2819,49 +2822,31 @@
       return out;
     }
 
-    // ── Strategy 1.5: read the selected metric name directly from dropdown trigger ──
     try {
       const triggerCandidates = queryAllDeep('div.metric-selector-trigger, div[class*="metric-selector-trigger"]');
       for (const trigger of triggerCandidates) {
+        if (!isCorrectSide(trigger)) continue; // Only check the correct side
         const text = trigger.textContent || '';
         const label = normalizeCandidate(text);
-        if (label) {
-          log('CS metric from trigger text:', label);
-          return label;
-        }
+        if (label) return label;
       }
     } catch (_) {}
 
-    // ── Strategy 2: selector-based scan across normal DOM + shadow DOM ─────
     for (const sel of domSelectors) {
       try {
         const candidates = queryAllDeep(sel);
         for (const el of candidates) {
-          const text = [
-            el.textContent,
-            el.getAttribute && el.getAttribute('aria-label'),
-            el.getAttribute && el.getAttribute('title')
-          ].filter(Boolean).join(' ');
+          if (!isCorrectSide(el)) continue; // Only check the correct side
+          const text = [ el.textContent, el.getAttribute?.('aria-label'), el.getAttribute?.('title') ].filter(Boolean).join(' ');
           const label = normalizeCandidate(text);
-          if (label) {
-            log('CS metric from DOM selector:', sel, '->', label);
-            return label;
-          }
+          if (label) return label;
         }
       } catch (_) {}
     }
 
-    // ── Strategy 2.5: score known metric labels by "selected/active" signals ──
-    // This helps disambiguate cases where multiple metrics are visible (e.g. Click vs Attractiveness)
-    // and only one is currently selected.
     try {
       const allEls = queryAllDeep('*');
       let best = null;
-
-      function isVisible(el) {
-        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-        return !!rect && rect.width > 0 && rect.height > 0;
-      }
 
       function scoreElement(el, metricName) {
         const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -2872,73 +2857,28 @@
 
         let score = 0;
         if (lowText === lowMetric) score += 4;
-        if (isVisible(el)) score += 2;
+        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        if (rect && rect.width > 0 && rect.height > 0) score += 2;
 
-        const ariaSelected = (el.getAttribute && el.getAttribute('aria-selected')) || '';
-        const ariaCurrent = (el.getAttribute && el.getAttribute('aria-current')) || '';
-        const dataSelected = (el.getAttribute && el.getAttribute('data-selected')) || '';
-        if (ariaSelected === 'true') score += 8;
-        if (ariaCurrent && ariaCurrent !== 'false') score += 6;
-        if (dataSelected === 'true') score += 6;
-        if (el.hasAttribute && el.hasAttribute('selected')) score += 6;
-
-        const role = ((el.getAttribute && el.getAttribute('role')) || '').toLowerCase();
-        if (/^(tab|option|radio|menuitemradio)$/.test(role)) score += 3;
-
-        const className = String(el.className || '').toLowerCase();
-        if (/(active|selected|current|checked)/.test(className)) score += 4;
-
-        // Penalize long blobs of text where metric appears incidentally.
+        if (el.getAttribute?.('aria-selected') === 'true') score += 8;
+        if (el.getAttribute?.('aria-current') && el.getAttribute?.('aria-current') !== 'false') score += 6;
+        if (el.getAttribute?.('data-selected') === 'true') score += 6;
+        if (el.hasAttribute?.('selected')) score += 6;
+        if (/^(tab|option|radio|menuitemradio)$/.test((el.getAttribute?.('role') || '').toLowerCase())) score += 3;
+        if (/(active|selected|current|checked)/.test(String(el.className || '').toLowerCase())) score += 4;
         if (text.length > metricName.length + 40) score -= 3;
-
         return score;
       }
 
       for (const metricName of knownMetricNames) {
         for (const el of allEls) {
+          if (!isCorrectSide(el)) continue; // Only check the correct side
           const s = scoreElement(el, metricName);
           if (!Number.isFinite(s)) continue;
-          if (!best || s > best.score) {
-            best = { score: s, metricName };
-          }
+          if (!best || s > best.score) best = { score: s, metricName };
         }
       }
-
-      if (best && best.score >= 8) {
-        log('CS metric from scored label scan:', best.metricName, 'score=', best.score);
-        return best.metricName;
-      }
-    } catch (_) {}
-
-    // ── Strategy 3: broad text scan in shadow-inclusive content ─────────────
-    function collectTextFromNode(node, parts) {
-      if (!node) return;
-      if (node.nodeType === 3) { parts.push(node.nodeValue || ''); return; }
-      if (node.shadowRoot) collectTextFromNode(node.shadowRoot, parts);
-      for (const child of (node.childNodes || [])) collectTextFromNode(child, parts);
-    }
-    try {
-      const parts = [];
-      collectTextFromNode(document.body, parts);
-      const fullText = parts.join(' ');
-
-      // Exact known name match first.
-      for (const name of knownMetricNames) {
-        if (fullText.includes(name)) {
-          log('CS metric from shadow text scan:', name);
-          return name;
-        }
-      }
-
-      // Regex fallback (e.g. unseen "Something Rate").
-      const m = fullText.match(/\b([A-Za-z][A-Za-z\s]{1,30}(?:Rate|Revenue|Transactions?|Sessions?|Visitors?|Bounce\s+Rate|Scroll\s+Depth))\b/i);
-      if (m && m[1]) {
-        const label = normalizeCandidate(m[1]);
-        if (label) {
-          log('CS metric from regex fallback:', label);
-          return label;
-        }
-      }
+      if (best && best.score >= 8) return best.metricName;
     } catch (_) {}
 
     return '';
@@ -2979,7 +2919,40 @@
     return `${n.toFixed(Math.max(0, Number(decimals) || 0))}%`;
   }
 
-  function generateDefaultZoneName(origMetric, csTypeName) {
+  function getPaneLabel(el) {
+    if (!el) return '';
+    let hasLeft = false, hasRight = false;
+    const center = window.innerWidth / 2;
+    
+    getAllZoneElements().forEach(zone => {
+       const rect = zone.getBoundingClientRect();
+       if (rect.left + rect.width / 2 > center) hasRight = true;
+       else hasLeft = true;
+    });
+    
+    // Only append labels if there are actively zones on both sides of the screen
+    if (hasLeft && hasRight) {
+       const elRect = el.getBoundingClientRect();
+       return (elRect.left + elRect.width / 2 > center) ? ' (Right Pane)' : ' (Left Pane)';
+    }
+    return '';
+  }
+
+
+  function getPaneLabelFromKey(zoneKey) {
+    if (!zoneKey) return '';
+    // The key already knows which side it's on! Just read it directly.
+    if (zoneKey.includes('cmp-side:right') || zoneKey.includes('side:right')) {
+      return ' (Right Pane)';
+    }
+    if (zoneKey.includes('cmp-side:left') || zoneKey.includes('side:left')) {
+      return ' (Left Pane)';
+    }
+    return '';
+  }
+
+
+  function generateDefaultZoneName(origMetric, csTypeName, paneSide = 'left') {
     const resolvedType = isMetricTypeCompatible(origMetric, csTypeName) ? csTypeName : '';
     const base = resolvedType || inferMetricLabel(origMetric);
     const existingOfBase = Object.values(overrides).filter(ov => {
@@ -2987,8 +2960,14 @@
       const b = ovType || inferMetricLabel(ov.origMetric || '');
       return b === base;
     }).length;
-    return `${base} ${existingOfBase + 1}`;
+    
+    // Add "(Right Pane)" dynamically if we are on a split screen
+    const isSplitScreen = window.innerWidth > 1200; // rough heuristic for compare mode
+    const sideLabel = isSplitScreen && paneSide === 'right' ? ' (Right Pane)' : (isSplitScreen ? ' (Left Pane)' : '');
+    
+    return `${base} ${existingOfBase + 1}${sideLabel}`;
   }
+
 
   function hasDuplicateZoneIdAcrossPanes(zoneId) {
     const id = String(zoneId || '').trim();
@@ -3030,7 +3009,34 @@
     return null;
   }
 
-  function buildEditorState(zoneEl) {
+function onZoneClick(zoneEl, e) {
+    if (!editMode || !zoneEl || !uiVisible) return;
+    const editorState = buildEditorState(zoneEl, e); // Pass the mouse event!
+
+    log('Intercepted zone click. id=', editorState.zoneId, 'key=', editorState.zoneKey, 'frame=', editorState.frameContextKey, 'debug=', getZoneDebugSnapshot(zoneEl));
+    e.stopPropagation();
+    e.preventDefault();
+    e.stopImmediatePropagation();
+
+    if (!isTopFrame) {
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: { type: 'openEditor', editorState }
+      }, response => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          console.warn('[CS Demo Tool][broadcast openEditor failed]', err.message || err);
+        } else {
+          log('Opening top-frame editor for', editorState.zoneKey, 'broadcast response=', response || {});
+        }
+      });
+      return;
+    }
+
+    openEditPopover(editorState, zoneEl);
+  }
+
+  function buildEditorState(zoneEl, event = null) {
     const zoneId = zoneEl.getAttribute('id') || '';
     const paneKey = getPaneKey(zoneEl) || '';
     const zoneKey = getZoneKey(zoneEl) || (zoneId && paneKey ? `${paneKey}::${zoneId}` : zoneId);
@@ -3039,9 +3045,7 @@
     const existing = getOverrideForElement(zoneEl);
     const zoneName = existing?.override?.zoneName || '';
     const origMetric = existing?.override?.origMetric || currentMetric;
-    // Capture the current CS metric type name so subframes carry it in editorState
     refreshMetricTypeName();
-    const csTypeNameForState = csMetricTypeName;
 
     let limitMin = 0;
     let limitMax = 100;
@@ -3052,17 +3056,10 @@
     } catch (_) {}
 
     return {
-      frameContextKey,
-      zoneId,
-      zoneKey,
-      currentMetric,
-      currentValue,
-      hasOverride: !!existing,
-      limitMin,
-      limitMax,
-      zoneName,
-      origMetric,
-      csMetricTypeName: csTypeNameForState
+      frameContextKey, zoneId, zoneKey, currentMetric, currentValue,
+      hasOverride: !!existing, limitMin, limitMax, zoneName, origMetric,
+      csMetricTypeName: csMetricTypeName,
+      screenX: event ? event.screenX : 0 // CAPTURE THE ABSOLUTE MOUSE POSITION
     };
   }
 
@@ -3149,26 +3146,19 @@
     const rawOrigColor = existingOv?.origColor ?? el.getAttribute('color');
     const origColor = rawOrigColor === null ? undefined : rawOrigColor;
 
-    // Remove any old-format keys for this zone.
     if (existing && existing.key !== getMetricBasedKey(resolvedZoneKey, origMetric)) {
       delete overrides[existing.key];
     }
-    if (overrides[resolvedZoneKey]) delete overrides[resolvedZoneKey]; // legacy no-metric key
+    if (overrides[resolvedZoneKey]) delete overrides[resolvedZoneKey]; 
     if (zoneId && zoneId !== resolvedZoneKey && overrides[zoneId]) delete overrides[zoneId];
 
     const resolvedTypeName = csTypeName || csMetricTypeName || '';
-    const finalName = zoneName || existingOv?.zoneName || generateDefaultZoneName(origMetric, resolvedTypeName);
+    
+    // SAFE: Pass the resolvedZoneKey into the generator so it can extract the side text
+    const finalName = zoneName || existingOv?.zoneName || generateDefaultZoneName(origMetric, resolvedTypeName, resolvedZoneKey);
+    
     const newKey = getMetricBasedKey(resolvedZoneKey, origMetric);
     overrides[newKey] = { metric, value, origMetric, origValue, origColor, zoneName: finalName, csMetricTypeName: resolvedTypeName };
-    log('Persisting override', {
-      requestedZoneKey: zoneKey,
-      resolvedZoneKey,
-      savedKey: newKey,
-      zoneId,
-      metric,
-      value,
-      debug: getZoneDebugSnapshot(el)
-    });
 
     applyOverride(el, { metric, value });
     return true;
@@ -3418,7 +3408,7 @@
 
   function onZoneClick(zoneEl, e) {
     if (!editMode || !zoneEl || !uiVisible) return;
-    const editorState = buildEditorState(zoneEl);
+    const editorState = buildEditorState(zoneEl, e); // Pass the mouse event!
 
     log('Intercepted zone click. id=', editorState.zoneId, 'key=', editorState.zoneKey, 'frame=', editorState.frameContextKey, 'debug=', getZoneDebugSnapshot(zoneEl));
     e.stopPropagation();
@@ -3426,7 +3416,6 @@
     e.stopImmediatePropagation();
 
     if (!isTopFrame) {
-      // Subframe: send to background for fan-out; top frame will open the popup.
       chrome.runtime.sendMessage({
         type: 'broadcastToTab',
         payload: { type: 'openEditor', editorState }
@@ -3452,10 +3441,16 @@
   }
 
   // ─── EDIT POPOVER ────────────────────────────────────────────────────────
-
   function openEditPopover(editorState, zoneEl = null) {
     closePopover();
     popoverOpenedAt = Date.now();
+
+    // SPATIAL MATH: Calculate side based on absolute monitor position
+    let paneSide = 'left';
+    if (editorState.screenX) {
+      const browserCenter = window.screenX + (window.outerWidth / 2);
+      paneSide = editorState.screenX > browserCenter ? 'right' : 'left';
+    }
 
     const isHeatmapPointEditor = editorState.kind === 'heatmap-point';
     const zoneId = editorState.zoneId || '';
@@ -3463,7 +3458,16 @@
     const currentMetric = editorState.currentMetric || '';
     const currentValue = editorState.currentValue || String(parseFloat(currentMetric) || 0);
     const hasOverride = !!editorState.hasOverride;
-    const existingZoneName = editorState.zoneName || '';
+    
+    // FETCH METRIC USING THE SIDE YOU CLICKED ON
+    const csTypeNameForState = readCsMetricTypeName(paneSide) || editorState.csMetricTypeName || '';
+    const csTypeName = isMetricTypeCompatible(currentMetric, csTypeNameForState) ? csTypeNameForState : '';
+    
+    let existingZoneName = editorState.zoneName || '';
+    if (!existingZoneName && !hasOverride) {
+      existingZoneName = generateDefaultZoneName(editorState.origMetric, csTypeNameForState, paneSide);
+    }
+
     const heatmapLayer = String(editorState.heatmapPoint?.layer || 'clicks');
     const heatmapPointX = Math.round(Number(editorState.heatmapPoint?.xPct || 0) * 100);
     const heatmapPointY = Math.round(Number(editorState.heatmapPoint?.yPct || 0) * 100);
@@ -3485,12 +3489,6 @@
     const showCenterColorInput = isHeatmapPointEditor && heatmapLayer === 'clicks';
     const defaultCenterColor = String(editorState.heatmapPoint?.centerColor || '#ee3a32');
     const initialPointLevel = normalizeHeatmapPointLevel(inferHeatmapPointLevel(editorState.heatmapPoint), 'medium');
-    // Re-evaluate in top frame at click-time in case CS UI loaded after init.
-    if (isTopFrame) refreshMetricTypeName();
-
-    // Use the CS metric type name from editorState (if provided) or the latest top-frame cache.
-    const candidateCsTypeName = editorState.csMetricTypeName || csMetricTypeName || '';
-    const csTypeName = isMetricTypeCompatible(currentMetric, candidateCsTypeName) ? candidateCsTypeName : '';
     const defaultNameHint = csTypeName ? `e.g. ${csTypeName} 1` : 'e.g. Click Rate 1';
 
     popoverHost = document.createElement('div');
@@ -4893,10 +4891,14 @@
     syncZoneWatchers();
   }
 
-  async function resetAll() {
+  async function resetAll(skipConfirm) {
     const count = getTotalOverrideCount();
     if (count === 0) return;
-    if (!confirm(`Reset all ${count} override${count !== 1 ? 's' : ''} on this page?`)) return;
+    
+    // If the message explicitly says to skip the confirm, bypass it. Otherwise, ask.
+    if (skipConfirm !== true) {
+      if (!confirm(`Reset all ${count} override${count !== 1 ? 's' : ''} on this page?`)) return;
+    }
 
     if (isTopFrame) {
       // Broadcast to all frames (including this one) to reset their zones
@@ -5441,7 +5443,8 @@
         top: 64px;
         right: 20px;
         z-index: 2147483645;
-        width: 360px;
+        /* INCREASED WIDTH TO 420px */
+        width: 420px;
         max-height: min(70vh, 560px);
         overflow: auto;
         background: #fff;
@@ -5479,6 +5482,8 @@
       .item:hover { background: #f0f0fa; }
       .name {
         flex: 1;
+        /* INCREASED WIDTH FOR THE TEXT ITSELF */
+        width: 220px;
         font-weight: 600;
         font-size: 12px;
         white-space: nowrap;
@@ -5645,15 +5650,15 @@
   }
 
   // ─── SCENARIOS ───────────────────────────────────────────────────────────
-
   function openScenariosMenu() {
     if (!uiVisible) return;
-    // Close other panels
+    
+    // teardown logic
     const exposureHost = document.getElementById('cs-demo-exposure-host');
     const editsHost = document.getElementById('cs-demo-edits-host');
     if (exposureHost) exposureHost.remove();
     if (editsHost) editsHost.remove();
-    // Simple in-page scenario manager using a shadow DOM panel
+    
     if (document.getElementById('cs-demo-scenarios-host')) {
       document.getElementById('cs-demo-scenarios-host').remove();
       return;
@@ -5671,7 +5676,8 @@
         top: 64px;
         right: 20px;
         z-index: 2147483645;
-        width: 280px;
+        /* INCREASED WIDTH TO 380px */
+        width: 380px;
         background: #fff;
         border-radius: 12px;
         box-shadow: 0 8px 32px rgba(0,0,0,0.2), 0 2px 8px rgba(0,0,0,0.1);
@@ -5765,6 +5771,15 @@
         border: 1px solid #ffcccc;
       }
       .btn-del:hover { background: #ffe4e4; }
+      /* INDIVIDUAL EXPORT BUTTON STYLES */
+      .btn-export-sc {
+        background: #e8e8f0;
+        color: #444;
+        font-size: 10px;
+        padding: 4px 8px;
+        border: 1px solid #d0d0e0;
+      }
+      .btn-export-sc:hover { background: #dcdce8; }
       .empty {
         text-align: center;
         padding: 24px;
@@ -5776,37 +5791,6 @@
         border-top: 1px solid #eee;
         margin: 12px 0;
       }
-      .override-item {
-        display: flex;
-        align-items: center;
-        padding: 6px 10px;
-        border-radius: 7px;
-        gap: 6px;
-        transition: background 0.12s;
-      }
-      .override-item:hover { background: #f0f0fa; }
-      .override-name {
-        flex: 1;
-        font-weight: 600;
-        font-size: 12px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .override-meta {
-        font-size: 10px;
-        color: #888;
-        white-space: nowrap;
-      }
-      .btn-reset-ov {
-        background: #fff0f0;
-        color: #cc3333;
-        font-size: 10px;
-        padding: 4px 8px;
-        border: 1px solid #ffcccc;
-      }
-      .btn-reset-ov:hover { background: #ffe4e4; }
-      .overrides-list { max-height: 160px; overflow-y: auto; }
       .section-header-row {
         display: flex;
         align-items: center;
@@ -5826,9 +5810,7 @@
     panel.className = 'panel';
 
     function escHtml(str) {
-      return String(str || '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+      return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
     function render(scenarios) {
@@ -5847,7 +5829,7 @@
           <div class="section-label" style="margin-top:-8px;margin-bottom:12px;text-transform:none;letter-spacing:0;font-size:11px;color:#9a9ab0;">Save includes zoning + heatmap edits.</div>
           <div class="section-header-row">
             <span class="section-label">Saved (${items.length})</span>
-            <button class="btn btn-file" id="btn-export">⬇ Export</button>
+            <button class="btn btn-file" id="btn-export">⬇ Export All</button>
             <button class="btn btn-file btn-file-import" id="btn-import">⬆ Import</button>
           </div>
           <div class="scenario-list" id="sc-list">
@@ -5855,6 +5837,7 @@
               <div class="scenario-item">
                 <span class="scenario-name" title="${escHtml(name)}">${escHtml(name)}</span>
                 <span class="scenario-meta">${Object.keys(sc.overrides || {}).length} zoning + ${Object.keys(sc.heatmapPoints || {}).length} heatmap</span>
+                <button class="btn btn-export-sc" data-export="${escHtml(name)}" title="Export this scenario only">⬇</button>
                 <button class="btn btn-load" data-load="${escHtml(name)}">Load</button>
                 <button class="btn btn-del" data-del="${escHtml(name)}">✕</button>
               </div>
@@ -5867,7 +5850,7 @@
       shadow.adoptedStyleSheets = [sheet];
       shadow.appendChild(panel);
 
-      // Export all scenarios for this page to a JSON file
+      // GLOBAL EXPORT
       shadow.getElementById('btn-export')?.addEventListener('click', () => {
         chrome.storage.local.get('csZoningScenarios', result => {
           const allScenarios = result.csZoningScenarios || {};
@@ -5884,15 +5867,30 @@
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url;
-          const slug = getUrlKey().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 50);
-          a.download = `cs-scenarios-${slug}.json`;
+          
+          let fileName = 'cs-scenarios';
+          const scenarioNames = Object.keys(pageItems);
+          const inputName = shadow.getElementById('inp-name')?.value?.trim();
+          
+          if (scenarioNames.length === 1) {
+            fileName = scenarioNames[0]; 
+          } else if (inputName) {
+            fileName = inputName; 
+          } else {
+            const slug = getUrlKey().replace(/[^a-z0-9]+/gi, '-').replace(/^-|-$/g, '').slice(0, 50);
+            fileName += `-${slug}`;
+          }
+          
+          const safeName = fileName.replace(/[^a-z0-9 _-]/gi, '-').replace(/-+/g, '-').trim();
+          a.download = `${safeName}.json`;
+          
           document.body.appendChild(a);
           a.click();
           setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 5000);
         });
       });
 
-      // Import scenarios from a JSON file
+      // Import scenarios
       shadow.getElementById('btn-import')?.addEventListener('click', () => {
         const input = document.createElement('input');
         input.type = 'file';
@@ -5906,7 +5904,6 @@
           reader.onload = () => {
             try {
               const parsed = JSON.parse(reader.result);
-              // Accept both {scenarios:{...}} wrapper and bare {name: sc} objects
               const importedMap = parsed.scenarios && typeof parsed.scenarios === 'object'
                 ? parsed.scenarios
                 : parsed;
@@ -5930,7 +5927,6 @@
                   }
                 });
                 chrome.storage.local.set({ csZoningScenarios: all }, () => {
-                  log('Imported', imported, 'scenarios from file');
                   renderPanel();
                 });
               });
@@ -5966,9 +5962,37 @@
         });
       });
 
+      // SCENARIO ACTION BUTTONS
       shadow.getElementById('sc-list')?.addEventListener('click', e => {
         const loadName = e.target.dataset.load;
         const delName = e.target.dataset.del;
+        const exportName = e.target.dataset.export; 
+
+        // Individual Export
+        if (exportName) {
+          chrome.storage.local.get('csZoningScenarios', result => {
+            const sc = (result.csZoningScenarios || {})[exportName];
+            if (!sc) return;
+            const payload = {
+              version: 1,
+              exportedAt: new Date().toISOString(),
+              pageKey: getUrlKey(),
+              scenarios: { [exportName]: sc } // Only export THIS scenario
+            };
+            const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            
+            const safeName = exportName.replace(/[^a-z0-9 _-]/gi, '-').replace(/-+/g, '-').trim();
+            a.download = `${safeName}.json`;
+            
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 5000);
+          });
+        }
+
         if (loadName) {
           chrome.storage.local.get('csZoningScenarios', result => {
             const sc = (result.csZoningScenarios || {})[loadName];
@@ -5998,7 +6022,6 @@
     renderPanel();
     document.body.appendChild(host);
 
-    // Close when clicking outside
     const closeOnOutside = e => {
       if (!host.contains(e.target) && !toolbarHost?.contains(e.target)) {
         host.remove();
@@ -6007,6 +6030,7 @@
     };
     setTimeout(() => document.addEventListener('click', closeOnOutside, true), 0);
   }
+
 
   // ─── SPA URL CHANGE DETECTION ────────────────────────────────────────────
 
@@ -6157,11 +6181,18 @@
       });
       return true;
     }
+
     if (msg.type === 'resetAll') {
-      resetAll();
+      // CORE FIX: Only let the top-level window process the popup's command.
+      // This stops 30 iframes from throwing confirm() dialogs at the same time!
+      if (isTopFrame) {
+        resetAll(msg.skipConfirm);
+      }
       sendResponse({ ok: true });
       return true;
     }
+
+
     if (msg.type === 'resetAllFrames') {
       resetAllInFrame().then(() => {
         sendResponse({ ok: true });
