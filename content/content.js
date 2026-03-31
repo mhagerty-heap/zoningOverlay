@@ -14,9 +14,9 @@
   const bootstrapInstance = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   document.documentElement?.setAttribute('data-cs-demo-instance', bootstrapInstance);
 
-  const CS_DEBUG = true;
+  const CS_DEBUG = false;
   const CS_FORCE_CONTEXT = true;
-  const CS_DEFAULT_LOG_MODE = 'trace'; // 'trace' | 'all' | 'off'
+  const CS_DEFAULT_LOG_MODE = 'off'; // 'trace' | 'all' | 'off'
   const CS_ENABLE_HEATMAP_INTERACTIONS = true;
   const CS_TRACE_LOG_PREFIXES = [
     'Intercepted zone click',
@@ -3340,19 +3340,19 @@
   function applyAllOverrides() {
     const zoneElements = getAllZoneElements();
     if (window.__ZONING_DEBUG_LOG__ !== false) {
-      console.log('[ZONING-DEBUG][applyAllOverrides] zoneElements.length:', zoneElements.length);
+      // console.log('[ZONING-DEBUG][applyAllOverrides] zoneElements.length:', zoneElements.length);
     }
     zoneElements.forEach(el => {
       const key = getZoneKey(el);
       const existing = getOverrideForElement(el);
       if (window.__ZONING_DEBUG_LOG__ !== false) {
-        console.log('[ZONING-DEBUG][applyAllOverrides]', {
-          el,
-          key,
-          hasOverride: !!existing,
-          override: existing?.override,
-          allOverrideKeys: Object.keys(overrides)
-        });
+        // console.log('[ZONING-DEBUG][applyAllOverrides]', {
+        //   el,
+        //   key,
+        //   hasOverride: !!existing,
+        //   override: existing?.override,
+        //   allOverrideKeys: Object.keys(overrides)
+        // });
       }
       if (existing) applyOverride(el, existing.override);
     });
@@ -4147,13 +4147,13 @@
     const frameScope = window.frameElement ? `${window.frameElement.tagName}#${window.frameElement.id || ''}[${window.frameElement.className || ''}]` : 'top';
     // TEMP LOG: capture frameScope, paneKey, zoneKey, value
     if (window.__ZONING_DEBUG_LOG__ !== false) {
-      console.log('[ZONING-DEBUG][saveZoneOverride]', {
-        frameScope,
-        paneKey,
-        zoneKey,
-        value,
-        location: window.location.href
-      });
+      // console.log('[ZONING-DEBUG][saveZoneOverride]', {
+      //   frameScope,
+      //   paneKey,
+      //   zoneKey,
+      //   value,
+      //   location: window.location.href
+      // });
     }
     const wrote = upsertZoneOverride(el, zoneKey, zoneId, metric, value, zoneName, csTypeName);
     if (wrote) await persistOverrides();
@@ -6934,8 +6934,8 @@
       const zoneElements = getAllZoneElements();
       if (zoneElements.length > 0) {
         const domKeys = zoneElements.map(getZoneKey).filter(Boolean);
-        console.log('[ZONING-DEBUG][observer] DOM zone keys:', domKeys);
-        console.log('[ZONING-DEBUG][observer] Loaded override keys:', Object.keys(overrides));
+        //console.log('[ZONING-DEBUG][observer] DOM zone keys:', domKeys);
+        //console.log('[ZONING-DEBUG][observer] Loaded override keys:', Object.keys(overrides));
         applyAllOverrides();
         // We no longer disconnect the observer here so it catches SPA navigation
       }
@@ -6978,9 +6978,9 @@
     await loadGlobalEditMode();
     await loadUiVisibility();
     await loadOverrides();
-    console.log('[ZONING-DEBUG][init] Loaded overrides:', Object.keys(overrides));
+    //console.log('[ZONING-DEBUG][init] Loaded overrides:', Object.keys(overrides));
     await loadHeatmapPointOverrides();
-    console.log('[ZONING-DEBUG][init] Loaded heatmapPointOverrides:', Object.keys(heatmapPointOverrides));
+    //console.log('[ZONING-DEBUG][init] Loaded heatmapPointOverrides:', Object.keys(heatmapPointOverrides));
 
     // 3. Start Document Observer
     startDocObserver();
@@ -7009,7 +7009,7 @@
     
     // Final debug log and interaction listeners
     applyAllOverrides();
-    console.log('[ZONING-DEBUG][init] Called applyAllOverrides after page load.');
+    //console.log('[ZONING-DEBUG][init] Called applyAllOverrides after page load.');
 
     window.addEventListener('resize', scheduleHeatmapOverlayRender, true);
     window.addEventListener('scroll', scheduleHeatmapOverlayRender, true);
