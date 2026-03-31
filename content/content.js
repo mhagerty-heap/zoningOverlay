@@ -66,9 +66,10 @@
       // Cross-origin or restricted parent access.
     }
 
-    // Fallback for unusual frame hosts where frameElement index is inaccessible.
-    return `sub:${location.origin}${location.pathname}${(location.hash || '').split('?')[0]}`;
+    // CORE FIX: Strip location.hash because CS injects changing JWT tokens here
+    return `sub:${location.origin}${location.pathname}`;
   }
+
 
   const frameScopeKey = getFrameScopeKey();
   const frameInstanceKey = makeFrameInstanceKey();
@@ -215,11 +216,18 @@
   function normalizeCsUrlKey(rawUrl) {
     try {
       const parsed = new URL(rawUrl);
+      // CORE FIX: If it's a snapshot iframe, the hash is a volatile JWT. Strip it.
+      if (parsed.hostname.includes('snapshot.contentsquare.com')) {
+        return parsed.origin + parsed.pathname;
+      }
+      // Otherwise, keep the hash (used for routing in the main app)
       return parsed.origin + parsed.pathname + parsed.hash.split('?')[0];
     } catch (_) {
       return '';
     }
   }
+
+  
 
   function setActivePageKey(nextKey, syncGlobal = false) {
     if (!nextKey) return;
@@ -2322,39 +2330,35 @@
           const idx = allFrames.indexOf(frameEl);
           if (idx >= 0) return `frame:${idx}`;
 
-          // Shadow-rooted compare panes may not be reachable via querySelectorAll.
-          // Fall back to frame element geometry so side-by-side panes stay distinct.
           const fr = frameEl.getBoundingClientRect();
           const cx = fr.left + fr.width / 2;
           const side = cx >= (window.top?.innerWidth || window.innerWidth) / 2 ? 'right' : 'left';
           return `frame-geom:${Math.round(fr.left)}:${Math.round(fr.top)}:${Math.round(fr.width)}:${Math.round(fr.height)}:${side}`;
         }
-      } catch (_) {
-        // Cross-origin or restricted parent access.
-      }
+      } catch (_) {}
 
       try {
-        return `sub:${win.location.origin}${win.location.pathname}${(win.location.hash || '').split('?')[0]}`;
+        // CORE FIX: Strip win.location.hash here as well
+        return `sub:${win.location.origin}${win.location.pathname}`;
       } catch (_) {
         return frameScopeKey;
       }
     };
+    
     const withFrameScope = (base, node) => {
       const scope = getElementFrameScope(node);
       return scope === 'top' ? base : `${base}|${scope}`;
     };
-    // Always determine side by comparing the pane's bounding rect to the viewport center
+    
     const getHorizontalSide = rect => {
       if (!rect) return 'left';
-      // Use only the current window's innerWidth to avoid cross-origin errors
       const viewportCenter = window.innerWidth / 2;
       const centerX = Number(rect.left) + Number(rect.width) / 2;
       return centerX > viewportCenter ? 'right' : 'left';
     };
-    // Use the closest compare-pane host (zn-snapshot-header or app-zonings) to determine side
+    
     const zoneRect = (() => {
       try {
-        // Prefer the bounding rect of the compare-pane host if available
         const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header');
         if (snapshotHost) return snapshotHost.getBoundingClientRect();
         const zoningsHost = closestAcrossShadow(el, 'app-zonings');
@@ -2362,11 +2366,10 @@
         return el.getBoundingClientRect();
       } catch (_) { return null; }
     })();
+    
     const zoneSide = getHorizontalSide(zoneRect);
     const withCompareSide = base => `${base}|cmp-side:${zoneSide}`;
 
-    // Compare pages expose snapshot-pane hosts; use their left/right order as
-    // the strongest pane identity signal when available.
     const snapshotHost = closestAcrossShadow(el, 'zn-snapshot-header');
     if (snapshotHost) {
       const snapshotHosts = getAllElementsByTag('zn-snapshot-header')
@@ -2425,35 +2428,27 @@
     }
 
     const scrollContainer = closestAcrossShadow(el, 'app-heatmap-scroll-element');
-
     if (scrollContainer) {
       const fullpath = scrollContainer.getAttribute('fullpath');
       const allScrollContainers = getAllElementsByTag('app-heatmap-scroll-element');
       if (fullpath) {
-        // In split-screen comparison mode, both panes share the same fullpath.
-        // Append the pane index so overrides are scoped per pane independently.
         const sameFullpath = allScrollContainers.filter(c => c.getAttribute('fullpath') === fullpath);
         if (sameFullpath.length > 1) {
           const idx = sameFullpath.indexOf(scrollContainer);
           return withFrameScope(withCompareSide(`fullpath:${fullpath}:${idx}`), scrollContainer);
         }
-
-        // Shadow-rooted compare panes may hide sibling scroll containers from document.querySelectorAll.
-        // Detect a split layout by container width and add a horizontal bucket discriminator.
         const rect = scrollContainer.getBoundingClientRect();
         const isLikelySplitPane = rect.width > 0 && rect.width <= window.innerWidth * 0.75;
         if (isLikelySplitPane) {
           const side = getHorizontalSide(rect);
           return withFrameScope(withCompareSide(`fullpath:${fullpath}:side:${side}`), scrollContainer);
         }
-
         return withFrameScope(withCompareSide(`fullpath:${fullpath}`), scrollContainer);
       }
       const idx = allScrollContainers.indexOf(scrollContainer);
       if (idx >= 0) return withFrameScope(withCompareSide(`scroll:${idx}`), scrollContainer);
     }
 
-    // Fallback for unexpected DOM layouts: segment by horizontal position.
     const rect = el.getBoundingClientRect();
     const side = getHorizontalSide(rect);
     return withFrameScope(withCompareSide(`side:${side}`), el);
@@ -3015,22 +3010,23 @@
   // which naturally prevents cross-metric bleed in the MutationObserver as well.
   function getOverrideForElement(el) {
     const zoneKey = getZoneKey(el);
-    const zoneId = el.getAttribute('id');
-    const curMetric = el.getAttribute('metric') || '';
+    if (!zoneKey) return null;
 
-    if (zoneKey) {
-      const prefix = zoneKey + '@';
-      for (const [key, ov] of Object.entries(overrides)) {
-        if (!key.startsWith(prefix)) continue;
-        if (ov.origMetric === curMetric || ov.metric === curMetric) {
+    const curMetric = (el.getAttribute('metric') || '').trim();
+    const prefix = zoneKey + '@';
+
+    for (const [key, ov] of Object.entries(overrides)) {
+      if (key.startsWith(prefix)) {
+        // Match even if the metric is currently loading/empty
+        if (ov.origMetric === curMetric || ov.metric === curMetric || curMetric === '—' || curMetric === '') {
           return { key, override: ov };
         }
       }
-      // Legacy: key without metric suffix
-      if (overrides[zoneKey]) return { key: zoneKey, override: overrides[zoneKey] };
     }
-    // Intentionally avoid plain zoneId fallback in compare contexts: raw keys can
-    // bleed edits across panes that share IDs. Pane-scoped keys are authoritative.
+    
+    // CORE FIX: This legacy check MUST be outside the for-loop!
+    if (overrides[zoneKey]) return { key: zoneKey, override: overrides[zoneKey] };
+    
     return null;
   }
 
@@ -3189,6 +3185,64 @@
     persistOverrides();
   }
 
+  // function watchZone(el) {
+  //   const zoneKey = getZoneKey(el);
+  //   if (!zoneKey) return;
+
+  //   const existingWatcher = zoneObservers.get(zoneKey);
+  //   if (existingWatcher && existingWatcher.element === el) {
+  //     return;
+  //   }
+
+  //   // If key is reused for a replacement DOM node, tear down old watcher first.
+  //   if (existingWatcher && existingWatcher.element !== el) {
+  //     existingWatcher.observer.disconnect();
+  //     existingWatcher.element.removeEventListener('click', onZoneElementClick, true);
+  //     zoneObservers.delete(zoneKey);
+  //   }
+
+  //   migrateLegacyOverrideIfNeeded(el);
+
+  //   // Apply any stored override immediately
+  //   const existingOverride = getOverrideForElement(el);
+  //   if (existingOverride) {
+  //     applyOverride(el, existingOverride.override);
+  //   }
+
+  //   // Watch for the CS app overwriting our changes (e.g. on metric switch)
+  //   const mo = new MutationObserver(() => {
+  //     if (appliedOverrideFlag) return;
+  //     const existing = getOverrideForElement(el);
+  //     if (!existing) return;
+  //     const ov = existing.override;
+  //     const curMetric = el.getAttribute('metric');
+  //     if (curMetric !== ov.metric) {
+  //       // CS reset our value — reapply
+  //       requestAnimationFrame(() => applyOverride(el, ov));
+  //     }
+  //   });
+  //   mo.observe(el, { attributes: true, attributeFilter: ['metric', 'value', 'status'] });
+  //   zoneObservers.set(zoneKey, { observer: mo, element: el });
+
+  //   // Keep element-level capture listeners for iframe/shadow contexts.
+  //   ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
+  //     el.addEventListener(type, onZoneElementClick, true);
+  //   });
+  // }
+
+  // function unwatchZone(el) {
+  //   const zoneKey = getZoneKey(el);
+  //   if (!zoneKey) return;
+  //   const entry = zoneObservers.get(zoneKey);
+  //   if (entry && entry.element === el) {
+  //     entry.observer.disconnect();
+  //     zoneObservers.delete(zoneKey);
+  //   }
+  //   ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
+  //     el.removeEventListener(type, onZoneElementClick, true);
+  //   });
+  // }
+
   function watchZone(el) {
     const zoneKey = getZoneKey(el);
     if (!zoneKey) return;
@@ -3201,49 +3255,41 @@
     // If key is reused for a replacement DOM node, tear down old watcher first.
     if (existingWatcher && existingWatcher.element !== el) {
       existingWatcher.observer.disconnect();
-      existingWatcher.element.removeEventListener('click', onZoneElementClick, true);
+      // Remove listeners from the old element to prevent memory leaks or duplicate triggers
+      ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
+        existingWatcher.element.removeEventListener(type, onZoneElementClick, true);
+      });
       zoneObservers.delete(zoneKey);
     }
 
     migrateLegacyOverrideIfNeeded(el);
 
-    // Apply any stored override immediately
+    // APPLY IMMEDIATELY: This ensures overrides are persistent on page discovery/reload
     const existingOverride = getOverrideForElement(el);
     if (existingOverride) {
       applyOverride(el, existingOverride.override);
     }
 
-    // Watch for the CS app overwriting our changes (e.g. on metric switch)
+    // Set up MutationObserver to watch for the CS app resetting values (e.g., on metric switch)
     const mo = new MutationObserver(() => {
       if (appliedOverrideFlag) return;
       const existing = getOverrideForElement(el);
       if (!existing) return;
       const ov = existing.override;
       const curMetric = el.getAttribute('metric');
+      
       if (curMetric !== ov.metric) {
-        // CS reset our value — reapply
+        // If Contentsquare resets the value, re-apply the override on the next frame
         requestAnimationFrame(() => applyOverride(el, ov));
       }
     });
+    
     mo.observe(el, { attributes: true, attributeFilter: ['metric', 'value', 'status'] });
     zoneObservers.set(zoneKey, { observer: mo, element: el });
 
-    // Keep element-level capture listeners for iframe/shadow contexts.
+    // Attach listeners for editing interactions
     ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
       el.addEventListener(type, onZoneElementClick, true);
-    });
-  }
-
-  function unwatchZone(el) {
-    const zoneKey = getZoneKey(el);
-    if (!zoneKey) return;
-    const entry = zoneObservers.get(zoneKey);
-    if (entry && entry.element === el) {
-      entry.observer.disconnect();
-      zoneObservers.delete(zoneKey);
-    }
-    ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
-      el.removeEventListener(type, onZoneElementClick, true);
     });
   }
 
@@ -6725,10 +6771,13 @@
       const nextOverrides = all[getUrlKey()] || {};
       overrides = { ...nextOverrides };
       log('Storage overrides update received. keys=', Object.keys(overrides).length);
+      
       // Remove all visual overrides first, but do not trigger storage writes
       getAllZoneElements().forEach(el => {
-        const zoneKey = getZoneKey(el);
-        const hasOverride = zoneKey && overrides[zoneKey];
+        
+        // CORE FIX: Use the proper lookup function instead of the legacy key lookup
+        const hasOverride = getOverrideForElement(el); 
+        
         if (!hasOverride) {
           // Visual-only reset: revert attributes and styles, but do NOT update storage
           if (el.hasAttribute('data-cs-demo-orig-metric')) {
@@ -6793,34 +6842,120 @@
     }
   });
 
+  // async function init() {
+  //       // MutationObserver: apply overrides when zone elements appear
+  //       let observer = null;
+  //       function checkAndApplyOverrides() {
+  //         const zoneElements = getAllZoneElements();
+  //         if (zoneElements.length > 0) {
+  //           const domKeys = zoneElements.map(getZoneKey).filter(Boolean);
+  //           console.log('[ZONING-DEBUG][observer] DOM zone keys:', domKeys);
+  //           console.log('[ZONING-DEBUG][observer] Loaded override keys:', Object.keys(overrides));
+  //           applyAllOverrides();
+  //           if (observer) observer.disconnect();
+  //         }
+  //       }
+  //       function startObserverWhenBodyReady() {
+  //         if (document.body) {
+  //           observer = new MutationObserver(() => {
+  //             checkAndApplyOverrides();
+  //           });
+  //           observer.observe(document.body, { childList: true, subtree: true });
+  //           // In case elements are already present
+  //           checkAndApplyOverrides();
+  //         } else {
+  //           setTimeout(startObserverWhenBodyReady, 50);
+  //         }
+  //       }
+  //       startObserverWhenBodyReady();
+  //   log('Global zone interaction', `init frame=${frameTag}`, `url=${location.href}`);
+  //   log('Initializing content script. url=', location.href, 'origin=', location.origin, 'readyState=', document.readyState);
+  //   try {
+  //     chrome.runtime.sendMessage({ type: 'registerFrame' }, () => {
+  //       void chrome.runtime.lastError;
+  //     });
+  //   } catch (_) {
+  //     // Ignore registration failures; feature falls back to local frame behavior.
+  //   }
+  //   await loadActivePageKey();
+  //   if (isTopFrame && location.hostname === 'app.contentsquare.com') {
+  //     const initialKey = normalizeCsUrlKey(location.href);
+  //     setActivePageKey(initialKey, true);
+  //     log('Set initial active page key:', initialKey);
+  //     refreshMetricTypeName();
+  //     log('Detected CS metric type name:', csMetricTypeName || '(not detected yet)');
+  //   }
+  //   await loadGlobalEditMode();
+  //   await loadUiVisibility();
+  //   await loadOverrides();
+  //   console.log('[ZONING-DEBUG][init] Loaded overrides:', Object.keys(overrides));
+  //   await loadHeatmapPointOverrides();
+  //   console.log('[ZONING-DEBUG][init] Loaded heatmapPointOverrides:', Object.keys(heatmapPointOverrides));
+  //   startDocObserver();
+
+  //   // Start watching existing zones + create toolbar
+  //   syncZoneWatchers();
+  //   createToolbar();
+  //   applyUiVisibility();
+  //   renderHeatmapPointOverlays();
+  //   // Debug: log after applying all overrides
+  //   applyAllOverrides();
+  //   console.log('[ZONING-DEBUG][init] Called applyAllOverrides after page load.');
+  //   window.addEventListener('resize', scheduleHeatmapOverlayRender, true);
+  //   window.addEventListener('scroll', scheduleHeatmapOverlayRender, true);
+  //   document.addEventListener('scroll', scheduleHeatmapOverlayRender, true);
+  //   window.addEventListener('scroll', handleHeatmapScrollSignal, true);
+  //   document.addEventListener('scroll', handleHeatmapScrollSignal, true);
+  //   window.addEventListener('wheel', handleHeatmapScrollSignal, { capture: true, passive: true });
+  //   document.addEventListener('wheel', handleHeatmapScrollSignal, { capture: true, passive: true });
+  //   window.addEventListener('touchmove', handleHeatmapScrollSignal, { capture: true, passive: true });
+  //   document.addEventListener('touchmove', handleHeatmapScrollSignal, { capture: true, passive: true });
+  //   syncPageWorldState();
+
+  //   // If no zones yet, poll until they appear (SPA may not have rendered)
+  //   if (getAllZoneElements().length === 0) {
+  //     const poll = setInterval(() => {
+  //       const zones = getAllZoneElements();
+  //       if (zones.length > 0) {
+  //         zones.forEach(watchZone);
+  //         clearInterval(poll);
+  //       }
+  //     }, 500);
+  //     setTimeout(() => clearInterval(poll), 30000); // give up after 30s
+  //   }
+  // }
+
+// ─── INIT ─────────────────────────────────────────────────────────────────
+
   async function init() {
-        // MutationObserver: apply overrides when zone elements appear
-        let observer = null;
-        function checkAndApplyOverrides() {
-          const zoneElements = getAllZoneElements();
-          if (zoneElements.length > 0) {
-            const domKeys = zoneElements.map(getZoneKey).filter(Boolean);
-            console.log('[ZONING-DEBUG][observer] DOM zone keys:', domKeys);
-            console.log('[ZONING-DEBUG][observer] Loaded override keys:', Object.keys(overrides));
-            applyAllOverrides();
-            if (observer) observer.disconnect();
-          }
-        }
-        function startObserverWhenBodyReady() {
-          if (document.body) {
-            observer = new MutationObserver(() => {
-              checkAndApplyOverrides();
-            });
-            observer.observe(document.body, { childList: true, subtree: true });
-            // In case elements are already present
-            checkAndApplyOverrides();
-          } else {
-            setTimeout(startObserverWhenBodyReady, 50);
-          }
-        }
-        startObserverWhenBodyReady();
+    // 1. MutationObserver: apply overrides when zone elements appear
+    let observer = null;
+    function checkAndApplyOverrides() {
+      const zoneElements = getAllZoneElements();
+      if (zoneElements.length > 0) {
+        const domKeys = zoneElements.map(getZoneKey).filter(Boolean);
+        console.log('[ZONING-DEBUG][observer] DOM zone keys:', domKeys);
+        console.log('[ZONING-DEBUG][observer] Loaded override keys:', Object.keys(overrides));
+        applyAllOverrides();
+        // We no longer disconnect the observer here so it catches SPA navigation
+      }
+    }
+
+    function startObserverWhenBodyReady() {
+      if (document.body) {
+        observer = new MutationObserver(() => {
+          checkAndApplyOverrides();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+        checkAndApplyOverrides();
+      } else {
+        setTimeout(startObserverWhenBodyReady, 50);
+      }
+    }
+
     log('Global zone interaction', `init frame=${frameTag}`, `url=${location.href}`);
     log('Initializing content script. url=', location.href, 'origin=', location.origin, 'readyState=', document.readyState);
+
     try {
       chrome.runtime.sendMessage({ type: 'registerFrame' }, () => {
         void chrome.runtime.lastError;
@@ -6828,7 +6963,10 @@
     } catch (_) {
       // Ignore registration failures; feature falls back to local frame behavior.
     }
+
+    // 2. Load all state from storage
     await loadActivePageKey();
+    
     if (isTopFrame && location.hostname === 'app.contentsquare.com') {
       const initialKey = normalizeCsUrlKey(location.href);
       setActivePageKey(initialKey, true);
@@ -6836,22 +6974,43 @@
       refreshMetricTypeName();
       log('Detected CS metric type name:', csMetricTypeName || '(not detected yet)');
     }
+
     await loadGlobalEditMode();
     await loadUiVisibility();
     await loadOverrides();
     console.log('[ZONING-DEBUG][init] Loaded overrides:', Object.keys(overrides));
     await loadHeatmapPointOverrides();
     console.log('[ZONING-DEBUG][init] Loaded heatmapPointOverrides:', Object.keys(heatmapPointOverrides));
+
+    // 3. Start Document Observer
     startDocObserver();
 
-    // Start watching existing zones + create toolbar
+    // 4. NEW: AGGRESSIVE PERSISTENCE POLLING
+    // This solves the reload issue by checking for zones every 500ms for 20 seconds.
+    // Contentsquare is a heavy SPA; zones often arrive 2-5 seconds after the script first runs.
+    let pollCount = 0;
+    const initialApplyPoll = setInterval(() => {
+      const zones = getAllZoneElements();
+      if (zones.length > 0) {
+        applyAllOverrides(); 
+        zones.forEach(watchZone); // Ensures MutationObservers attach to new elements
+        updateToolbar();
+      }
+      pollCount++;
+      // Stop polling after 20 seconds to save CPU
+      if (pollCount > 40) clearInterval(initialApplyPoll); 
+    }, 500);
+
+    // 5. Initialize UI and Handlers
     syncZoneWatchers();
     createToolbar();
     applyUiVisibility();
     renderHeatmapPointOverlays();
-    // Debug: log after applying all overrides
+    
+    // Final debug log and interaction listeners
     applyAllOverrides();
     console.log('[ZONING-DEBUG][init] Called applyAllOverrides after page load.');
+
     window.addEventListener('resize', scheduleHeatmapOverlayRender, true);
     window.addEventListener('scroll', scheduleHeatmapOverlayRender, true);
     document.addEventListener('scroll', scheduleHeatmapOverlayRender, true);
@@ -6861,20 +7020,15 @@
     document.addEventListener('wheel', handleHeatmapScrollSignal, { capture: true, passive: true });
     window.addEventListener('touchmove', handleHeatmapScrollSignal, { capture: true, passive: true });
     document.addEventListener('touchmove', handleHeatmapScrollSignal, { capture: true, passive: true });
+    
     syncPageWorldState();
-
-    // If no zones yet, poll until they appear (SPA may not have rendered)
-    if (getAllZoneElements().length === 0) {
-      const poll = setInterval(() => {
-        const zones = getAllZoneElements();
-        if (zones.length > 0) {
-          zones.forEach(watchZone);
-          clearInterval(poll);
-        }
-      }, 500);
-      setTimeout(() => clearInterval(poll), 30000); // give up after 30s
-    }
+    installPageWorldDebugBridge();
+    
+    startObserverWhenBodyReady();
   }
+
+
+
 
   init();
 })();
