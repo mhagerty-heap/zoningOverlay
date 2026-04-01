@@ -1854,29 +1854,37 @@
       : toHeatColor(Math.min(1, field + 0.1), innerAlpha);
 
     if (isClicksLayer) {
-      const coreColor = level === 'high' ? '#ee3a32' : (level === 'medium' ? '#ebdc3e' : '#7de8f4');
-      const midColor  = level === 'high' ? '#ffc14a' : (level === 'medium' ? '#cfe96d' : '#54a8e0');
-      const ringColor = '#5c8ebb';
+      let customGradient = '';
+      if (level === 'high') {
+        customGradient = 'radial-gradient(circle closest-side, rgba(165, 50, 85, 1) 0%, rgba(225, 115, 80, 1) 20%, rgba(240, 230, 120, 0.9) 45%, rgba(130, 200, 130, 0.75) 65%, rgba(75, 105, 175, 0.5) 85%, rgba(75, 105, 175, 0) 100%)';
+      } else if (level === 'medium') {
+        customGradient = 'radial-gradient(circle closest-side, rgba(240, 230, 120, 1) 0%, rgba(130, 200, 130, 0.85) 35%, rgba(75, 105, 175, 0.6) 70%, rgba(75, 105, 175, 0) 100%)';
+      } else { // low
+        customGradient = 'radial-gradient(circle closest-side, rgba(175, 215, 145, 0.9) 0%, rgba(85, 175, 195, 0.7) 40%, rgba(75, 105, 175, 0.4) 75%, rgba(75, 105, 175, 0) 100%)';
+      }
 
-      // Click markers render as opaque discs.
+      // Retain your exact original sizing logic!
       const ringDiameter = Math.round((20 + fieldForSize * 10) * 1.05);
-      const bullseyeDiameter = Math.max(2, Math.round((7 + fieldForSize * 3) * 0.6));
 
       return {
         glowW: ringDiameter,
         glowH: Math.round(ringDiameter * profile.stretchY),
-        innerW: bullseyeDiameter,
-        innerH: Math.round(bullseyeDiameter * profile.stretchY),
+        innerW: 0, // Disable the hard inner bullseye
+        innerH: 0,
         blur: 0,
         innerBlur: 0,
-        mixBlendMode: 'normal',
+        mixBlendMode: 'multiply', // Crucial for overlapping heat effect
         outerBorder: 'none',
-        outerGradient: `radial-gradient(circle at center, ${hexToRgba(coreColor, 1)} 0% 16%, ${hexToRgba(midColor, 1)} 44%, ${hexToRgba(ringColor, 1)} 88%, ${hexToRgba(ringColor, 1)} 100%)`,
-        innerGradient: `radial-gradient(circle at center, ${hexToRgba(coreColor, 1)} 0%, ${hexToRgba(coreColor, 1)} 100%)`,
+        outerGradient: customGradient,
+        innerGradient: 'none', // Hides the inner div
         outerColor,
         innerColor
       };
     }
+
+
+
+
 
     return {
       glowW: Math.round(glowRadius * 2),
