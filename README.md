@@ -1,18 +1,18 @@
-# 🎨 Contentsquare Demo Extension for SCs
+# 🎨 Zoning Demo Extension for SCs
 
-A powerful Chrome Extension built specifically for Solutions Consultants (SCs) to customize, persist, and manage zoning and heatmap metrics within the Contentsquare app. 
+A powerful Chrome Extension built specifically for Solutions Consultants (SCs) to customize, persist, and manage zoning and heatmap metrics.
 
-This tool allows you to seamlessly tailor Contentsquare reports for highly specific, realistic client demonstrations without altering any underlying backend data.
+This tool allows you to seamlessly tailor zoning reports for highly specific, realistic client demonstrations without altering any underlying backend data.
 
 ## ✨ Key Features
 
 * **Seamless Metric Editing:** Toggle Edit Mode and click on any zoning element to instantly change its metric name and value.
 * **Bulk Data Generation:** Rapidly populate "dead" pages with realistic, intelligently formatted gradients for any metric (Clicks, Revenue, Recurrence, etc.).
 * **Rock-Solid Persistence:** Edits survive page reloads, date range changes, and device toggles. The extension intelligently strips volatile session tokens (JWTs) to ensure your custom data stays locked to the zone.
-* **Side-by-Side Compare Mode:** Full support for Contentsquare's comparison mode. Edits made on the Left Pane stay on the left, and edits on the Right Pane stay on the right.
+* **Side-by-Side Compare Mode:** Full support for comparison mode. Edits made on the Left Pane stay on the left, and edits on the Right Pane stay on the right.
 * **Scenario Management:** Build a perfect demo and save it as a "Scenario." Switch between different narratives with one click.
 * **Import & Export:** Export single scenarios or entire batches as JSON files to share with other SCs on your team.
-* **Context-Aware UI:** The extension UI automatically detects and displays the specific Contentsquare Report ID you are currently modifying.
+* **Context-Aware UI:** The extension UI automatically detects and displays the specific Report ID you are currently modifying.
 
 ---
 
@@ -32,7 +32,7 @@ Currently, this extension is loaded as an "unpacked" developer extension.
 ## 📖 How to Use
 
 ### 1. Editing Zones
-* Open a Contentsquare Zoning report.
+* Open a Zoning report.
 * Click the **CS Demo** button in your browser toolbar and toggle **Editing** to **ON**.
 * Click on any metric on the page to open the edit popover. Changes apply instantly and persist on reload.
 
@@ -67,7 +67,7 @@ The Advanced menu provides automated tools to seed data across the entire page:
 
 ## 🔧 Under the Hood (For Developers)
 
-* **Iframe Piercing & Messaging:** Contentsquare renders reports inside isolated subdomains. The extension uses a `chrome.runtime` message bridge to broadcast commands (like Bulk Fill or Reset) from the UI into the site-iframe.
+* **Iframe Piercing & Messaging:** Zoning renders reports inside isolated subdomains. The extension uses a `chrome.runtime` message bridge to broadcast commands (like Bulk Fill or Reset) from the UI into the site-iframe.
 * **Stable Key Generation:** Zone IDs are generated using a combination of the report ID, pane geometry, and DOM hierarchies. `location.hash` data is stripped to avoid breaking persistence with volatile JWTs.
 * **DOM Sanitization:** The "Reset All" function targets `data-cs-demo-orig` attributes to ensure that background `value` attributes (used by CS for heatmap coloring) are fully restored or removed, preventing "state leaks" between bulk edits.
 * **Smart Formatter:** The formatting engine uses regex sniffing to detect currency symbols, percent signs, and decimal patterns (like `N/A` or `1.00`) to ensure generated data looks native to the specific metric selected.
