@@ -4860,7 +4860,10 @@ function onZoneClick(zoneEl, e) {
         const orig = existing.override;
         if (orig.origMetric !== undefined) {
           el.setAttribute('metric', orig.origMetric);
+          // NEW FIX: If it didn't have a value before, completely strip the attribute now
           if (orig.origValue !== undefined) el.setAttribute('value', String(orig.origValue));
+          else el.removeAttribute('value'); 
+          
           if (orig.origColor !== undefined) el.setAttribute('color', String(orig.origColor));
           else el.removeAttribute('color');
         }
@@ -4924,6 +4927,106 @@ function onZoneClick(zoneEl, e) {
     }
 
     updateToolbar();
+  }
+
+  async function applyBulkFillToCurrentMetric(maxVal, minVal) {
+    refreshMetricTypeName();
+    const currentMetricName = String(csMetricTypeName || '').trim();
+
+    let zoneElements = getCandidateZoneElements();
+    if (zoneElements.length === 0) {
+      syncZoneWatchers();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      zoneElements = getCandidateZoneElements();
+    }
+
+    // SMART FORMATTING DETECTORS
+    let hasPercent = false;
+    let hasCurrency = false;
+    let hasTime = false;
+    let hasDecimal = false;
+
+    const eligibleZones = [];
+    zoneElements.forEach(el => {
+      const existing = getOverrideForElement(el);
+      if (existing) return; 
+
+      const curMetric = (el.getAttribute('metric') || '').trim();
+      const curValueAttr = el.getAttribute('value');
+
+      // Sniff the original text for formatting clues
+      if (curMetric.includes('%')) hasPercent = true;
+      if (/[€$£¥]/.test(curMetric)) hasCurrency = true;
+      if (/\d\s*s\b/.test(curMetric) || curMetric.endsWith('s')) hasTime = true;
+      if (/[\.,]\d/.test(curMetric)) hasDecimal = true; // Detects decimals like 1.00 or 0,50
+
+      let numVal = NaN;
+      if (curValueAttr !== null && curValueAttr.trim() !== '') {
+        numVal = parseFloat(curValueAttr);
+      } else {
+        numVal = parseFloat(curMetric.replace(/[^0-9.,-]/g, '').replace(',', '.'));
+      }
+
+      // Explicitly catch N/A along with the other zero conditions
+      const isZero = curMetric.toUpperCase() === 'N/A' || curMetric.includes('—') || curMetric === '-' || curMetric === '' || isNaN(numVal) || Math.abs(numVal) < 0.1;
+
+      if (isZero) {
+        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+        const y = rect && Number.isFinite(rect.top) && Number.isFinite(rect.height)
+          ? (rect.top + rect.height / 2)
+          : Number.NaN;
+        eligibleZones.push({ el, y, zoneId: el.getAttribute('id') || '', zoneKey: getZoneKey(el) || '' });
+      }
+    });
+
+    if (eligibleZones.length === 0) {
+      return { applied: 0, totalZones: zoneElements.length };
+    }
+
+    // Determine final format based on sniffs + metric name heuristics
+    const isCurrency = hasCurrency || /(revenue|sales|order|transaction|aov|cart|price)/i.test(currentMetricName);
+    const isPercentage = hasPercent || /(rate|ratio|conversion|bounce|engagement|attractiveness|activity|exposure)/i.test(currentMetricName) || currentMetricName.includes('%');
+    const isTime = hasTime || /(time|duration|seconds?)/i.test(currentMetricName);
+    const isDecimal = hasDecimal || /(recurrence|average|per session|per user)/i.test(currentMetricName);
+
+    const formatMetricValue = (val) => {
+      if (isCurrency) return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      if (isPercentage) return `${val.toFixed(1)}%`;
+      if (isTime) return `${val.toFixed(1)}s`;
+      if (isDecimal) return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      // Default integer formatting (e.g., Clicks)
+      return Math.round(val).toLocaleString('en-US');
+    };
+
+    eligibleZones.sort((a, b) => {
+      const aY = Number.isFinite(a.y) ? a.y : 0;
+      const bY = Number.isFinite(b.y) ? b.y : 0;
+      return aY - bY;
+    });
+
+    let applied = 0;
+    const totalEligible = eligibleZones.length;
+
+    eligibleZones.forEach((row, index) => {
+      if (!row.zoneKey) return;
+      let numericValue = maxVal;
+      if (totalEligible > 1) {
+        const ratio = index / (totalEligible - 1);
+        numericValue = maxVal - (ratio * (maxVal - minVal));
+      }
+      
+      const displayMetric = formatMetricValue(numericValue);
+      
+      const wrote = upsertZoneOverride(row.el, row.zoneKey, row.zoneId, displayMetric, numericValue, '', currentMetricName);
+      if (wrote) applied++;
+    });
+
+    if (applied > 0) {
+      await persistOverrides();
+      syncZoneWatchers();
+      updateToolbar();
+    }
+    return { applied, totalZones: zoneElements.length };
   }
 
   function openExposurePanel() {
@@ -5103,12 +5206,25 @@ function onZoneClick(zoneEl, e) {
 
     panel.innerHTML = `
       <div class="panel-header">⚙️ Advanced</div>
-      <div class="tabs" style="display: none !important;">
-        <button class="tab-btn active" id="tab-exposure" type="button">Exposure</button>
-        <button class="tab-btn" id="tab-heatmaps" type="button">Heatmaps</button>
-      </div>
-      <div class="tab-content active" id="tab-content-exposure">
-        <div class="section-label">Exposure Auto-Seed Bounds</div>
+      <div class="tab-content active" style="display: block;">
+        
+        <div class="section-label" style="color: #2c2c8c;">1. Bulk Fill Current Metric</div>
+        <div class="hint" style="margin-top:-4px; margin-bottom:10px;">Auto-populates zero-value/empty zones for the metric currently on screen.</div>
+        <div class="row">
+          <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max Value (e.g. 15)">
+          <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min Value (e.g. 1)">
+        </div>
+        <button class="btn btn-apply" id="btn-bulk-fill" style="margin-bottom: 4px;">Fill Zeros for Current Metric</button>
+        
+        <hr class="divider">
+
+        <div class="section-label" style="color: #cc3333;">2. Generate All Client Metrics</div>
+        <div class="hint" style="margin-top:-4px; margin-bottom:10px;">(Coming soon) Rebuilds entire page data across all metric types.</div>
+        <button class="btn btn-apply" id="btn-nuclear-fill" disabled style="background: #a0a0b0; border-color: #a0a0b0; cursor: not-allowed; margin-bottom: 4px;">Generate All Data</button>
+
+        <hr class="divider">
+
+        <div class="section-label">3. Exposure Auto-Seed Bounds</div>
         <div class="row">
           <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top %">
           <input id="inp-exp-bottom" class="inp" type="number" step="0.1" value="20" placeholder="Bottom %">
@@ -5148,38 +5264,7 @@ function onZoneClick(zoneEl, e) {
           }
         </div>
         <div class="hint">Uses current viewport as fold by default: zones above fold get Top %, then values decrease toward Bottom % below fold.</div>
-        <button class="btn btn-apply" id="btn-auto-exposure">Apply Exposure Gradient</button>
-      </div>
-      
-      <div class="tab-content" id="tab-content-heatmaps" style="display: none !important;">
-        <div class="section-label">Heatmap Layer Scenarios</div>
-        <div class="hint">Each scenario can override one or more layers. If a layer has no data in the scenario, existing on-page values are preserved.</div>
-        <div class="row">
-          <input id="inp-hm-scenario-name" class="inp" type="text" maxlength="60" placeholder="Scenario name">
-        </div>
-        <div class="row">
-          <select id="sel-hm-layer" class="inp">
-            <option value="clicks">Clicks</option>
-            <option value="moves">Moves</option>
-            <option value="scrolls">Scrolls</option>
-            <option value="attention">Attention</option>
-          </select>
-        </div>
-        <div class="row">
-          <button class="btn" id="btn-hm-save-layer" style="width:100%;background:#f1f1ff;color:#2c2c8c;border:1px solid #d9daf5;">Save Current Overrides To Layer</button>
-        </div>
-        <div class="row">
-          <select id="sel-hm-scenario-apply" class="inp"></select>
-        </div>
-        <div class="row">
-          <button class="btn btn-apply" id="btn-hm-apply-blend">Apply Scenario Blend</button>
-        </div>
-        <div class="row">
-          <button class="btn" id="btn-hm-rename" style="flex:1;background:#f7f7fc;color:#4a4a64;border:1px solid #dbdbea;">Rename Selected</button>
-          <button class="btn" id="btn-hm-delete" style="flex:1;background:#fff0f0;color:#cc3333;border:1px solid #ffcccc;">Delete Selected</button>
-        </div>
-        <hr class="divider">
-        <div class="tiny" id="txt-hm-summary">Overrides: none | Preserves: Clicks, Moves, Scrolls, Attention</div>
+        <button class="btn btn-apply" id="btn-auto-exposure" style="background: #4a4a64;">Apply Exposure Gradient</button>
       </div>
     `;
 
@@ -5192,142 +5277,6 @@ function onZoneClick(zoneEl, e) {
     const chkFixedFold = shadow.getElementById('chk-exp-fixed-fold');
     const inpFixedFold = shadow.getElementById('inp-exp-fixed-fold');
     const viewportHint = shadow.getElementById('txt-exp-viewport');
-    const tabExposure = shadow.getElementById('tab-exposure');
-    const tabHeatmaps = shadow.getElementById('tab-heatmaps');
-    const tabContentExposure = shadow.getElementById('tab-content-exposure');
-    const tabContentHeatmaps = shadow.getElementById('tab-content-heatmaps');
-
-    const hmScenarioNameInput = shadow.getElementById('inp-hm-scenario-name');
-    const hmLayerSelect = shadow.getElementById('sel-hm-layer');
-    const hmSaveLayerButton = shadow.getElementById('btn-hm-save-layer');
-    const hmScenarioApplySelect = shadow.getElementById('sel-hm-scenario-apply');
-    const hmApplyBlendButton = shadow.getElementById('btn-hm-apply-blend');
-    const hmRenameButton = shadow.getElementById('btn-hm-rename');
-    const hmDeleteButton = shadow.getElementById('btn-hm-delete');
-    const hmSummaryText = shadow.getElementById('txt-hm-summary');
-
-    function setAdvancedTab(tabId) {
-      const isExposure = tabId === 'exposure';
-      tabExposure?.classList.toggle('active', isExposure);
-      tabHeatmaps?.classList.toggle('active', !isExposure);
-      tabContentExposure?.classList.toggle('active', isExposure);
-      tabContentHeatmaps?.classList.toggle('active', !isExposure);
-    }
-
-    tabExposure?.addEventListener('click', () => setAdvancedTab('exposure'));
-    tabHeatmaps?.addEventListener('click', () => setAdvancedTab('heatmaps'));
-
-    async function refreshHeatmapScenarioUi(preferredName = '') {
-      const all = await readLayerScenarios();
-      const names = getLayerScenarioNamesForCurrentPage(all);
-
-      if (hmScenarioApplySelect) {
-        hmScenarioApplySelect.innerHTML = names.length
-          ? names.map(name => `<option value="${escHtml(name)}">${escHtml(name)}</option>`).join('')
-          : '<option value="">No heatmap scenarios yet</option>';
-      }
-
-      if (preferredName && names.includes(preferredName)) {
-        hmScenarioApplySelect.value = preferredName;
-      }
-
-      const selectedName = hmScenarioApplySelect?.value || '';
-      const selectedScenario = selectedName ? all[selectedName] : null;
-      const summary = getLayerScenarioSummary(selectedScenario || {});
-
-      const pretty = value => value.charAt(0).toUpperCase() + value.slice(1);
-      const overridden = summary.overriddenLayers.length
-        ? summary.overriddenLayers.map(pretty).join(', ')
-        : 'none';
-      const preserved = summary.preservedLayers.length
-        ? summary.preservedLayers.map(pretty).join(', ')
-        : 'none';
-
-      if (hmSummaryText) {
-        hmSummaryText.textContent = `Overrides: ${overridden} | Preserves: ${preserved}`;
-      }
-    }
-
-    hmScenarioApplySelect?.addEventListener('change', () => {
-      refreshHeatmapScenarioUi(hmScenarioApplySelect.value);
-    });
-
-    hmSaveLayerButton?.addEventListener('click', async () => {
-      const scenarioName = String(hmScenarioNameInput?.value || '').trim();
-      const layerKey = String(hmLayerSelect?.value || '').trim();
-      if (!scenarioName) {
-        alert('Enter a heatmap scenario name first.');
-        return;
-      }
-
-      const result = await saveCurrentOverridesToLayerScenario(scenarioName, layerKey);
-      if (!result.ok) {
-        alert(`Could not save layer data: ${result.reason}`);
-        return;
-      }
-
-      await refreshHeatmapScenarioUi(result.scenarioName);
-      alert(`Saved ${result.savedOverrides} overrides to ${result.scenarioName} (${result.layerKey}).`);
-    });
-
-    hmApplyBlendButton?.addEventListener('click', async () => {
-      const scenarioName = String(hmScenarioApplySelect?.value || '').trim();
-      if (!scenarioName) {
-        alert('Select a heatmap scenario to apply.');
-        return;
-      }
-
-      const result = await applyLayerScenarioBlend(scenarioName);
-      if (!result.ok) {
-        alert(`Could not apply scenario blend: ${result.reason}`);
-        return;
-      }
-
-      await refreshHeatmapScenarioUi(result.scenarioName);
-      alert(`Applied heatmap blend from ${result.scenarioName}: ${result.activeLayers.join(', ')}.`);
-    });
-
-    hmRenameButton?.addEventListener('click', async () => {
-      const selectedName = String(hmScenarioApplySelect?.value || '').trim();
-      const nextName = String(hmScenarioNameInput?.value || '').trim();
-      if (!selectedName) {
-        alert('Select a scenario to rename.');
-        return;
-      }
-      if (!nextName) {
-        alert('Enter a new scenario name in the name field.');
-        return;
-      }
-
-      const result = await renameLayerScenario(selectedName, nextName);
-      if (!result.ok) {
-        alert(`Could not rename scenario: ${result.reason}`);
-        return;
-      }
-
-      await refreshHeatmapScenarioUi(result.newName);
-      alert(`Renamed scenario: ${result.oldName} → ${result.newName}.`);
-    });
-
-    hmDeleteButton?.addEventListener('click', async () => {
-      const selectedName = String(hmScenarioApplySelect?.value || '').trim();
-      if (!selectedName) {
-        alert('Select a scenario to delete.');
-        return;
-      }
-      if (!confirm(`Delete heatmap scenario "${selectedName}"?`)) return;
-
-      const result = await deleteLayerScenario(selectedName);
-      if (!result.ok) {
-        alert(`Could not delete scenario: ${result.reason}`);
-        return;
-      }
-
-      await refreshHeatmapScenarioUi();
-      alert(`Deleted heatmap scenario: ${result.scenarioName}.`);
-    });
-
-    refreshHeatmapScenarioUi();
 
     function updateViewportHint() {
       const px = Math.max(0, Math.round(window.innerHeight || 0));
@@ -5407,6 +5356,61 @@ function onZoneClick(zoneEl, e) {
       }
 
       alert(`Exposure gradient applied to ${result.changed} zones.`);
+    });
+
+    shadow.getElementById('btn-bulk-fill')?.addEventListener('click', () => {
+      const maxVal = parseFloat(shadow.getElementById('inp-bulk-max')?.value);
+      const minVal = parseFloat(shadow.getElementById('inp-bulk-min')?.value);
+
+      if (isNaN(maxVal) || isNaN(minVal)) {
+        alert('Please enter valid numbers for the Max and Min values.');
+        return;
+      }
+      if (maxVal < minVal) {
+        alert('Max value should be greater than Min value for a descending gradient.');
+        return;
+      }
+
+      const btn = shadow.getElementById('btn-bulk-fill');
+      const originalText = btn.textContent;
+      btn.textContent = 'Processing...';
+      btn.style.opacity = '0.7';
+      btn.disabled = true;
+
+      // BROADCAST TO ALL IFRAMES
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: {
+          type: 'applyBulkFillInFrame',
+          maxVal: maxVal,
+          minVal: minVal
+        }
+      }, (response) => {
+        btn.textContent = originalText;
+        btn.style.opacity = '1';
+        btn.disabled = false;
+
+        let totalApplied = 0;
+        let totalFoundZones = 0;
+
+        // Tally up the responses from the iframe(s)
+        if (response && response.results) {
+          response.results.forEach(res => {
+            if (res.payload && res.payload.ok) {
+              totalApplied += (res.payload.applied || 0);
+              totalFoundZones += (res.payload.totalZones || 0);
+            }
+          });
+        }
+
+        if (totalApplied > 0) {
+          alert(`Success! Auto-populated ${totalApplied} zero-value zones.`);
+        } else if (totalFoundZones === 0) {
+          alert('Found 0 zones. Are you sure the zoning layer is fully loaded?');
+        } else {
+          alert(`Found ${totalFoundZones} total zones, but none evaluated to zero (or they were already manually edited).`);
+        }
+      });
     });
 
     document.body.appendChild(host);
@@ -6187,6 +6191,14 @@ function onZoneClick(zoneEl, e) {
       });
       return true;
     }
+
+    if (msg.type === 'applyBulkFillInFrame') {
+      applyBulkFillToCurrentMetric(msg.maxVal, msg.minVal).then(result => {
+        sendResponse({ ok: true, frame: frameContextKey, ...result });
+      });
+      return true; // Keep channel open for async
+    }
+
     if (msg.type === 'applyExposureGradientInFrame') {
       if (msg.originFrameContextKey && msg.originFrameContextKey === frameContextKey) {
         sendResponse({ ok: true, skippedOrigin: true, frame: frameContextKey });
