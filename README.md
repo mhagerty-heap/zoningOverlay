@@ -7,12 +7,12 @@ This tool allows you to seamlessly tailor Contentsquare reports for highly speci
 ## ✨ Key Features
 
 * **Seamless Metric Editing:** Toggle Edit Mode and click on any zoning element to instantly change its metric name and value.
+* **Bulk Data Generation:** Rapidly populate "dead" pages with realistic, intelligently formatted gradients for any metric (Clicks, Revenue, Recurrence, etc.).
 * **Rock-Solid Persistence:** Edits survive page reloads, date range changes, and device toggles. The extension intelligently strips volatile session tokens (JWTs) to ensure your custom data stays locked to the zone.
-* **Side-by-Side Compare Mode:** Full support for Contentsquare's comparison mode. Edits made on the Left Pane stay on the left, and edits on the Right Pane stay on the right, automatically labeled for clarity using Spatial DOM logic.
+* **Side-by-Side Compare Mode:** Full support for Contentsquare's comparison mode. Edits made on the Left Pane stay on the left, and edits on the Right Pane stay on the right.
 * **Scenario Management:** Build a perfect demo and save it as a "Scenario." Switch between different narratives with one click.
 * **Import & Export:** Export single scenarios or entire batches as JSON files to share with other SCs on your team.
-* **Advanced Exposure Gradients:** Use the Advanced menu to auto-seed realistic, descending Exposure Rate gradients above and below the fold.
-* **Context-Aware UI:** The extension UI automatically detects and displays the specific Contentsquare Report ID you are currently modifying to prevent cross-client confusion.
+* **Context-Aware UI:** The extension UI automatically detects and displays the specific Contentsquare Report ID you are currently modifying.
 
 ---
 
@@ -33,33 +33,41 @@ Currently, this extension is loaded as an "unpacked" developer extension.
 
 ### 1. Editing Zones
 * Open a Contentsquare Zoning report.
-* Click the **CS Demo** button in your browser toolbar to open the extension menu.
-* Toggle **Editing** to **ON**.
-* Click on any metric on the page. A popover will appear allowing you to change the value and the metric name.
-* Edits apply instantly and persist on reload.
+* Click the **CS Demo** button in your browser toolbar and toggle **Editing** to **ON**.
+* Click on any metric on the page to open the edit popover. Changes apply instantly and persist on reload.
 
-### 2. Managing Scenarios
-Scenarios allow you to save your current page state (all zoning and heatmap edits) into a single, clickable profile.
+### 2. Bulk Fill & Advanced Tools (The "Advanced" Menu)
+The Advanced menu provides automated tools to seed data across the entire page:
+
+* **Bulk Fill Current Metric:** Use this to populate all zones currently showing `0`, `0.00%`, or `N/A`. 
+    * Set a **Max** and **Min** value; the tool sorts zones top-to-bottom and applies a descending gradient.
+    * **Smart Formatting:** It automatically detects if it should apply `%`, `$`, or decimal places (e.g., for Recurrence) based on the existing page context.
+* **Exposure Auto-Seed:** Specialized coordinate-based logic. It uses the browser's "Fold" line to set 100% exposure above the fold and a pixel-perfect drop-off below the fold.
+
+### 3. Managing Scenarios
 * Click **Scenarios** in the top extension menu.
-* Type a name (e.g., "Retail Pitch - High Cart Abandonment") and click **Save**.
-* Click **Load** next to any saved scenario to instantly overwrite the page with those edits.
-* **Sharing:** Click the **⬇ (Export)** button next to a specific scenario to download it as a `.json` file, or click **⬇ Export All** to download every scenario tied to the current report. Use **⬆ Import** to load scenarios built by other SCs.
+* Save your current setup (e.g., "Checkout Friction Story") to load it later or share it.
+* **Sharing:** Use the **Export** button to share `.json` scenarios with teammates. They can use **Import** to see exactly what you built.
 
-### 3. Reviewing Active Edits
-* Click the orange **"X edits"** button in the top menu to view a list of all currently modified zones.
-* The menu shows the original value, the new value, and automatically tags if the edit is on the Left Pane or Right Pane.
-* Click **Delete** next to any row to revert that specific zone to its original, true data.
+### 4. Reviewing and Resetting Edits
+* Click the orange **"X edits"** button to see a list of every modification on the current view.
+* **Delete:** Remove specific edits individually.
+* **Reset All:** Use the main "Reset All" button to perform a deep-clean of the DOM, removing all injected metrics, background values, and edited styles to return to the native client data.
 
-### 4. Advanced Auto-Exposure
-Need to quickly make a realistic exposure map? 
-* Click **Advanced** in the top menu.
-* Set your Top % and Bottom % bounds (e.g., 100% at the top of the page, bleeding down to 20% at the bottom).
-* Click **Apply Exposure Gradient** to automatically math out and apply descending values to all zones based on their physical location relative to the browser fold.
+---
+
+## ⚖️ When to use which Auto-Populate?
+
+| Feature | Logic Type | Best Metric For... |
+| :--- | :--- | :--- |
+| **Bulk Fill** | **Rank-Based** (1st, 2nd, 3rd...) | Click Rate, Revenue, Conversion, Recurrence, Activity. |
+| **Exposure Seed** | **Pixel-Based** (Distance from Fold) | Exposure Rate, Visibility. |
 
 ---
 
 ## 🔧 Under the Hood (For Developers)
 
-* **Iframe Piercing & CORS:** Contentsquare renders reports inside isolated subdomains (`snapshot.contentsquare.com`). The extension relies on a secure message bridge to pass data (like absolute `screenX` mouse coordinates) between the iframe and the top-level window to bypass cross-origin restrictions.
-* **Stable Key Generation:** Zone IDs are generated using a combination of the top-level report ID, the physical pane geometry, and DOM hierarchies. `location.hash` data is explicitly stripped during generation, as Contentsquare injects volatile JWTs that break standard persistence.
-* **Spatial Math:** To accurately label metrics in side-by-side comparison mode, the extension calculates the physical `getBoundingClientRect()` center-point of clicked zones to determine their relation to the viewport center, avoiding reliance on hidden 100%-width wrapper elements.
+* **Iframe Piercing & Messaging:** Contentsquare renders reports inside isolated subdomains. The extension uses a `chrome.runtime` message bridge to broadcast commands (like Bulk Fill or Reset) from the UI into the site-iframe.
+* **Stable Key Generation:** Zone IDs are generated using a combination of the report ID, pane geometry, and DOM hierarchies. `location.hash` data is stripped to avoid breaking persistence with volatile JWTs.
+* **DOM Sanitization:** The "Reset All" function targets `data-cs-demo-orig` attributes to ensure that background `value` attributes (used by CS for heatmap coloring) are fully restored or removed, preventing "state leaks" between bulk edits.
+* **Smart Formatter:** The formatting engine uses regex sniffing to detect currency symbols, percent signs, and decimal patterns (like `N/A` or `1.00`) to ensure generated data looks native to the specific metric selected.
