@@ -5100,7 +5100,7 @@ function onZoneClick(zoneEl, e) {
 
     panel.innerHTML = `
       <div class="panel-header">⚙️ Advanced</div>
-      <div class="tabs">
+      <div class="tabs" style="display: none !important;">
         <button class="tab-btn active" id="tab-exposure" type="button">Exposure</button>
         <button class="tab-btn" id="tab-heatmaps" type="button">Heatmaps</button>
       </div>
@@ -5147,7 +5147,8 @@ function onZoneClick(zoneEl, e) {
         <div class="hint">Uses current viewport as fold by default: zones above fold get Top %, then values decrease toward Bottom % below fold.</div>
         <button class="btn btn-apply" id="btn-auto-exposure">Apply Exposure Gradient</button>
       </div>
-      <div class="tab-content" id="tab-content-heatmaps">
+      
+      <div class="tab-content" id="tab-content-heatmaps" style="display: none !important;">
         <div class="section-label">Heatmap Layer Scenarios</div>
         <div class="hint">Each scenario can override one or more layers. If a layer has no data in the scenario, existing on-page values are preserved.</div>
         <div class="row">
@@ -5560,10 +5561,16 @@ function onZoneClick(zoneEl, e) {
       });
       const total = zoningEntries.length + heatmapEntries.length;
 
+      const reportMatch = getUrlKey().match(/\/zoning-v2\/(\d+)/);
+      const reportId = reportMatch ? reportMatch[1] : '';
+
       const panel = document.createElement('div');
       panel.className = 'panel';
       panel.innerHTML = `
-        <div class="panel-header">🧩 Active Edits (${total})</div>
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <span>🧩 Active Edits (${total})</span>
+          ${reportId ? `<span style="font-size: 10px; font-weight: normal; opacity: 0.7; letter-spacing: 0.5px;">Report #${reportId}</span>` : ''}
+        </div>
         <div class="panel-body">
           <div class="section-label">Zoning (${zoningEntries.length})</div>
           <div class="list" id="zoning-list">
@@ -5818,8 +5825,14 @@ function onZoneClick(zoneEl, e) {
         .filter(([, v]) => v.url === getUrlKey())
         .sort((a, b) => (b[1].createdAt || '') - (a[1].createdAt || ''));
 
+      const reportMatch = getUrlKey().match(/\/zoning-v2\/(\d+)/);
+      const reportId = reportMatch ? reportMatch[1] : '';
+
       panel.innerHTML = `
-        <div class="panel-header">📁 Scenarios</div>
+        <div class="panel-header" style="display: flex; justify-content: space-between; align-items: center;">
+          <span>📁 Scenarios</span>
+          ${reportId ? `<span style="font-size: 10px; font-weight: normal; opacity: 0.7; letter-spacing: 0.5px;">Report #${reportId}</span>` : ''}
+        </div>
         <div class="panel-body">
           <div class="section-label">Save current overrides</div>
           <div class="save-row">
