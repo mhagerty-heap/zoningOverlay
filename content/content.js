@@ -873,7 +873,12 @@
       }
       node = node.children[idx];
     }
-    return node && node.isConnected ? node : null;
+    if (node && node.isConnected) {
+       // Guard against false-positive static UI elements after tab swaps
+       const isValid = closestAcrossShadow(node, 'app-heatmap-scroll-element, hj-heatmaps-report, [class*="layers-container"], [data-qa-id*="heatmap"]');
+       if (isValid) return node;
+    }
+    return null;
   }
 
   function getLikelyPrimaryScrollContainer() {
@@ -1328,65 +1333,49 @@
     }
   }
 
+  function getVirtualScrollDeltaState(eventPath = []) {
+    // Look for the massive heatmap canvas and track its physical position
+    const canvases = getAllElementsByTag('canvas');
+    for (let i = 0; i < canvases.length; i++) {
+      if (canvases[i].clientHeight > window.innerHeight * 1.05) {
+        const rect = canvases[i].getBoundingClientRect();
+        return { x: rect.left, y: rect.top };
+      }
+    }
+    // Fallback if canvas is hidden
+    const el = findHeatmapScrollTransformElement(eventPath);
+    return getCSSTranslate(el);
+  }
+
   // Finds the element CS uses for virtual scroll via CSS transform.
   // CS scrolls its heatmap viewer by applying transform: translateY() to an inner layer element,
   // not via scrollTop. We identify that element so we can track its translate delta.
   function findHeatmapScrollTransformElement(composedPathArr) {
-    const path = Array.isArray(composedPathArr) ? composedPathArr : [];
-    const boundarySels = [
-      'app-heatmap-scroll-element',
-      'hj-heatmaps-report',
-      '[data-cs-qa-id="heatmap-report-container"]',
-      '[data-qa-id="heatmap-report-container"]',
-      '[id*="layers-container"]',
-      '[class*="layers-container"]',
-    ].join(',');
-
-    const hasTransform = node => {
-      if (!(node instanceof Element)) return false;
-      try {
-        const style = window.getComputedStyle(node);
-        const t = style.transform;
-        const wc = style.willChange || '';
-        const tr = style.transition || '';
-        return (t && t !== 'none') || wc.includes('transform') || tr.includes('transform');
-      } catch (_) {
-        return false;
-      }
-    };
-
-    // Walk composedPath from innermost outward; return first element with a CSS transform,
-    // stopping when we reach the outer heatmap container boundary.
-    for (const node of path) {
-      if (node === document.body || node === document.documentElement || node === document || node === window) break;
-      if (!(node instanceof Element)) continue;
-      if (hasTransform(node)) return node;
-      if (node.matches && node.matches(boundarySels)) break;
+    const boundarySels = 'app-heatmap-scroll-element, hj-heatmaps-report, [data-cs-qa-id="heatmap-report-container"], [data-qa-id="heatmap-report-container"], [id*="layers-container"], [class*="layers-container"]';
+    const roots = getAllElementsBySelector(boundarySels);
+    
+    for (const root of roots) {
+       // Look for an element with an explicit inline transform (CS virtual scroll)
+       const transformedChild = root.querySelector('[style*="transform"]');
+       if (transformedChild) return transformedChild;
+       
+       // Fallback: check shadow roots
+       if (root.shadowRoot) {
+          const shadowTransformed = root.shadowRoot.querySelector('[style*="transform"]');
+          if (shadowTransformed) return shadowTransformed;
+       }
     }
-
-    // Scan children (including inside shadow roots) of known heatmap containers.
-    const scanChildren = (root) => {
-      for (const child of Array.from(root.children || [])) {
-        if (hasTransform(child)) return child;
-        for (const grand of Array.from(child.children || [])) {
-          if (hasTransform(grand)) return grand;
-        }
-        if (child.shadowRoot) {
-          const found = scanChildren(child.shadowRoot);
-          if (found) return found;
-        }
-      }
-      return null;
-    };
-
-    const containerCands = [
-      ...getAllElementsBySelector('[id*="layers-container"],[class*="layers-container"]'),
-      ...getPrimaryHeatmapSurfaceElements(),
-      ...getAllElementsBySelector('[data-qa-id="heatmap-report-container"],[data-cs-qa-id="heatmap-report-container"]'),
-    ];
-    for (const container of containerCands) {
-      const found = scanChildren(container.shadowRoot || container);
-      if (found) return found;
+    
+    // Secondary fallback: computed style search
+    for (const root of roots) {
+       const children = root.shadowRoot ? root.shadowRoot.querySelectorAll('*') : root.querySelectorAll('*');
+       for (const child of children) {
+          try {
+             const style = window.getComputedStyle(child);
+             if (style.transform && style.transform !== 'none') return child;
+             if (style.willChange.includes('transform')) return child;
+          } catch(e) {}
+       }
     }
     return null;
   }
@@ -1475,8 +1464,9 @@
   }
 
   function buildHeatmapPointEditorState(clientX, clientY, surfaceEl = null, anchorHintEl = null, eventPath = []) {
-    const transformEl = findHeatmapScrollTransformElement(eventPath);
-    const transformTranslate = getCSSTranslate(transformEl);
+    // NEW: Use the robust Canvas tracker to record initial state
+    const transformTranslate = getVirtualScrollDeltaState(eventPath);
+    
     const hintedAnchor = (anchorHintEl && anchorHintEl.isConnected) ? anchorHintEl : null;
     const motionContainer = hintedAnchor || getHeatmapMotionContainerAtPoint(clientX, clientY, surfaceEl || null);
     const surface = surfaceEl
@@ -1625,7 +1615,9 @@
     sheet.replaceSync(`
       .marker {
         position: absolute;
-        transform: translate(-50%, -50%);
+        left: 0;
+        top: 0;
+        will-change: transform;
         pointer-events: none;
       }
       .marker-glow {
@@ -1899,31 +1891,25 @@
   }
 
   function renderHeatmapPointOverlays() {
-    // Clear per-surface overlays and remove any whose surface has been disconnected.
     heatmapSurfaceOverlays.forEach((shadow, surface) => {
       if (!surface.isConnected) {
         if (shadow._host?.isConnected) shadow._host.remove();
         heatmapSurfaceOverlays.delete(surface);
-      } else {
-        shadow.innerHTML = '';
       }
     });
 
-    // Clear the global viewport overlay (used for heatmap:viewport points).
     const viewportShadow = ensureHeatmapOverlayHost();
-    if (viewportShadow) viewportShadow.innerHTML = '';
+    if (!viewportShadow) return;
 
-    if (!uiVisible) return;
-
-    // Do not display heatmap point overlays while the UI is in zoning context.
-    // We still clear hosts above so stale markers disappear immediately on tab switch.
     const analysisMode = getActiveAnalysisMode();
     const heatmapEditingCtx = isHeatmapEditingContext();
     const heatmapView = isLikelyHeatmapView();
-    const showHeatmapOverlays = analysisMode === 'heatmap'
-      || heatmapEditingCtx
-      || heatmapView;
-    if (!showHeatmapOverlays) return;
+    const showHeatmapOverlays = uiVisible && (analysisMode === 'heatmap' || heatmapEditingCtx || heatmapView);
+
+    if (!showHeatmapOverlays) {
+      clearHeatmapPointOverlaysNow();
+      return;
+    }
 
     const activeLayer = normalizeHeatmapLayerName(getActiveHeatmapLayerName());
     const enforceStrictBounds = activeLayer === 'clicks';
@@ -1932,7 +1918,6 @@
       const pointFrame = String(point.frameContextKey || (isTopFrame ? 'top' : ''));
       if (!pointFrame) return false;
       if (pointFrame === frameContextKey) return true;
-      // Backward compatibility for points created before frame scoping was persisted.
       return pointFrame === 'top' && isTopFrame;
     });
 
@@ -1942,14 +1927,14 @@
       max: numericValues.length ? Math.max(...numericValues) : 100
     };
 
-    // Render all points in viewport space using resolved motion anchors.
-    // This avoids pinning when CS scroll is transform-driven rather than native scroll.
     const viewportEntries = [];
-    // Detect the CSS transform scroll element for delta-based rendering.
-    const heatmapTransformEl = findHeatmapScrollTransformElement([]);
-    const heatmapTransformNow = getCSSTranslate(heatmapTransformEl);
+    
+    // NEW: Evaluate the current canvas position
+    const heatmapTransformNow = getVirtualScrollDeltaState([]);
+    
     const surfaces = getAllHeatmapSurfaceElements();
     const fallbackScrollContainer = getLikelyPrimaryScrollContainer() || getBestViewportFallbackContainer();
+    
     layerPoints.forEach(point => {
       const surface = point.surfaceKey && point.surfaceKey !== 'heatmap:viewport'
         ? (surfaces.find(el => getHeatmapSurfaceKey(el) === point.surfaceKey) || null)
@@ -1960,17 +1945,11 @@
       const surfaceRect = surface ? surface.getBoundingClientRect() : null;
       const isInsideSurfaceBounds = pos => {
         if (!surfaceRect) return true;
-        return pos.x >= surfaceRect.left
-          && pos.x <= surfaceRect.right
-          && pos.y >= surfaceRect.top
-          && pos.y <= surfaceRect.bottom;
+        return pos.x >= surfaceRect.left && pos.x <= surfaceRect.right && pos.y >= surfaceRect.top && pos.y <= surfaceRect.bottom;
       };
       const isInsideClipBounds = pos => {
         if (!clipRect) return true;
-        return pos.x >= clipRect.left
-          && pos.x <= clipRect.right
-          && pos.y >= clipRect.top
-          && pos.y <= clipRect.bottom;
+        return pos.x >= clipRect.left && pos.x <= clipRect.right && pos.y >= clipRect.top && pos.y <= clipRect.bottom;
       };
       const isRenderablePosition = pos => {
         if (!enforceStrictBounds) return true;
@@ -1991,10 +1970,6 @@
         return;
       }
 
-      // CSS transform delta method: most reliable for CS virtual-scroll.
-      // When anchorTransformX/Y are present, resolve position as:
-      //   markerPos = (pageX - scrollX) + (currentTranslate - creationTranslate)
-      // This correctly tracks transform: translateY() scroll without needing scrollTop.
       if (typeof point.anchorTransformX !== 'undefined') {
         const dx = heatmapTransformNow.x - Number(point.anchorTransformX);
         const dy = heatmapTransformNow.y - Number(point.anchorTransformY);
@@ -2007,34 +1982,19 @@
           return;
         }
       }
+      
       let anchor = resolveHeatmapPointAnchorElement(point, surface);
       if (!anchor || !anchor.isConnected) {
-        const baseClientX = Number.isFinite(Number(point.pageX))
-          ? (Number(point.pageX) - Number(window.scrollX || 0))
-          : (window.innerWidth * Number(point.xPct || 0));
-        const baseClientY = Number.isFinite(Number(point.pageY))
-          ? (Number(point.pageY) - Number(window.scrollY || 0))
-          : (window.innerHeight * Number(point.yPct || 0));
+        const baseClientX = Number.isFinite(Number(point.pageX)) ? (Number(point.pageX) - Number(window.scrollX || 0)) : (window.innerWidth * Number(point.xPct || 0));
+        const baseClientY = Number.isFinite(Number(point.pageY)) ? (Number(point.pageY) - Number(window.scrollY || 0)) : (window.innerHeight * Number(point.yPct || 0));
         const pointMotionContainer = getHeatmapMotionContainerAtPoint(baseClientX, baseClientY, surface);
-        const forcedContainer = (pointMotionContainer && pointMotionContainer.isConnected)
-          ? pointMotionContainer
-          : ((fallbackScrollContainer && fallbackScrollContainer.isConnected)
-            ? fallbackScrollContainer
-            : getBestViewportFallbackContainer());
+        const forcedContainer = (pointMotionContainer && pointMotionContainer.isConnected) ? pointMotionContainer : ((fallbackScrollContainer && fallbackScrollContainer.isConnected) ? fallbackScrollContainer : getBestViewportFallbackContainer());
         if (forcedContainer && forcedContainer.isConnected) {
           const forcedRect = forcedContainer.getBoundingClientRect();
-          if (!Number.isFinite(Number(point.anchorContentX))) {
-            point.anchorContentX = Number(forcedContainer.scrollLeft || 0) + (baseClientX - forcedRect.left);
-          }
-          if (!Number.isFinite(Number(point.anchorContentY))) {
-            point.anchorContentY = Number(forcedContainer.scrollTop || 0) + (baseClientY - forcedRect.top);
-          }
-          if (!Number.isFinite(Number(point.anchorStartScrollLeft))) {
-            point.anchorStartScrollLeft = Number(forcedContainer.scrollLeft || 0);
-          }
-          if (!Number.isFinite(Number(point.anchorStartScrollTop))) {
-            point.anchorStartScrollTop = Number(forcedContainer.scrollTop || 0);
-          }
+          if (!Number.isFinite(Number(point.anchorContentX))) point.anchorContentX = Number(forcedContainer.scrollLeft || 0) + (baseClientX - forcedRect.left);
+          if (!Number.isFinite(Number(point.anchorContentY))) point.anchorContentY = Number(forcedContainer.scrollTop || 0) + (baseClientY - forcedRect.top);
+          if (!Number.isFinite(Number(point.anchorStartScrollLeft))) point.anchorStartScrollLeft = Number(forcedContainer.scrollLeft || 0);
+          if (!Number.isFinite(Number(point.anchorStartScrollTop))) point.anchorStartScrollTop = Number(forcedContainer.scrollTop || 0);
           if (!point.anchorDocPath) {
             point.anchorDocPath = buildAnchorPathFromDocument(forcedContainer);
             point.anchorKey = ensureHeatmapAnchorKey(forcedContainer);
@@ -2049,46 +2009,66 @@
           return;
         }
       }
+      
       const rect = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
       const pos = getHeatmapPointClientPosition(point, null, rect, anchor);
-      if (!pos) return;
-      if (!Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.y))) return;
-      if (!isRenderablePosition(pos)) return;
+      if (!pos || !Number.isFinite(Number(pos.x)) || !Number.isFinite(Number(pos.y)) || !isRenderablePosition(pos)) return;
       viewportEntries.push({ point, pos });
     });
 
     if (viewportShadow) {
+      const activeMarkerIds = new Set();
+
       viewportEntries.forEach(({ point, pos }) => {
+        const safePointId = point.pointId.replace(/:/g, '-');
+        const markerId = `hm-marker-${safePointId}`;
+        activeMarkerIds.add(markerId);
 
-        const marker = document.createElement('div');
-        marker.className = 'marker';
-        marker.style.left = `${pos.x}px`;
-        marker.style.top = `${pos.y}px`;
-
+        let marker = viewportShadow.querySelector(`[id="${markerId}"]`);
         const visual = buildHeatmapMarkerVisual(point, bounds, activeLayer);
 
-        const outerGlow = document.createElement('div');
-        outerGlow.className = 'marker-glow';
-        outerGlow.style.width = `${visual.glowW}px`;
-        outerGlow.style.height = `${visual.glowH}px`;
-        outerGlow.style.mixBlendMode = visual.mixBlendMode || 'screen';
-        outerGlow.style.background = visual.outerGradient
-          || `radial-gradient(ellipse at center, ${visual.outerColor} 0%, rgba(255,255,255,0) 72%)`;
-        outerGlow.style.filter = `blur(${visual.blur}px)`;
-        outerGlow.style.border = visual.outerBorder || 'none';
+        if (!marker) {
+          marker = document.createElement('div');
+          marker.id = markerId;
+          marker.className = 'marker';
 
-        const innerGlow = document.createElement('div');
-        innerGlow.className = 'marker-glow';
-        innerGlow.style.width = `${visual.innerW}px`;
-        innerGlow.style.height = `${visual.innerH}px`;
-        innerGlow.style.mixBlendMode = visual.mixBlendMode || 'screen';
-        innerGlow.style.background = visual.innerGradient
-          || `radial-gradient(ellipse at center, ${visual.innerColor} 0%, rgba(255,255,255,0) 74%)`;
-        innerGlow.style.filter = `blur(${typeof visual.innerBlur === 'number' ? visual.innerBlur : Math.max(2, Math.round(visual.blur * 0.28))}px)`;
+          const outerGlow = document.createElement('div');
+          outerGlow.className = 'marker-glow outer-glow';
+          marker.appendChild(outerGlow);
 
-        marker.appendChild(outerGlow);
-        marker.appendChild(innerGlow);
-        viewportShadow.appendChild(marker);
+          const innerGlow = document.createElement('div');
+          innerGlow.className = 'marker-glow inner-glow';
+          marker.appendChild(innerGlow);
+
+          viewportShadow.appendChild(marker);
+        }
+
+        marker.style.transform = `translate3d(${pos.x}px, ${pos.y}px, 0)`;
+
+        const outerGlow = marker.querySelector('.outer-glow');
+        if (outerGlow) {
+          outerGlow.style.width = `${visual.glowW}px`;
+          outerGlow.style.height = `${visual.glowH}px`;
+          outerGlow.style.mixBlendMode = visual.mixBlendMode || 'screen';
+          outerGlow.style.background = visual.outerGradient || `radial-gradient(ellipse at center, ${visual.outerColor} 0%, rgba(255,255,255,0) 72%)`;
+          outerGlow.style.filter = `blur(${visual.blur}px)`;
+          outerGlow.style.border = visual.outerBorder || 'none';
+        }
+
+        const innerGlow = marker.querySelector('.inner-glow');
+        if (innerGlow) {
+          innerGlow.style.width = `${visual.innerW}px`;
+          innerGlow.style.height = `${visual.innerH}px`;
+          innerGlow.style.mixBlendMode = visual.mixBlendMode || 'screen';
+          innerGlow.style.background = visual.innerGradient || `radial-gradient(ellipse at center, ${visual.innerColor} 0%, rgba(255,255,255,0) 74%)`;
+          innerGlow.style.filter = `blur(${typeof visual.innerBlur === 'number' ? visual.innerBlur : Math.max(2, Math.round(visual.blur * 0.28))}px)`;
+        }
+      });
+
+      Array.from(viewportShadow.children).forEach(child => {
+        if (child.classList.contains('marker') && !activeMarkerIds.has(child.id)) {
+          child.remove();
+        }
       });
     }
 
@@ -2114,16 +2094,29 @@
 
   let heatmapOverlayRaf = 0;
   let heatmapFollowUntil = 0;
+
+
+
+
+  let heatmapOverlayLoopRunning = false;
+  
   function scheduleHeatmapOverlayRender() {
-    if (heatmapOverlayRaf) return;
-    const run = () => {
-      heatmapOverlayRaf = 0;
-      renderHeatmapPointOverlays();
-      if (performance.now() < heatmapFollowUntil) {
-        heatmapOverlayRaf = requestAnimationFrame(run);
+    if (heatmapOverlayLoopRunning) return;
+    heatmapOverlayLoopRunning = true;
+    
+    const loop = () => {
+      const mode = getActiveAnalysisMode();
+      // If the heatmap is visible, sync the markers 60 times a second
+      if (uiVisible && (mode === 'heatmap' || isHeatmapEditingContext() || isLikelyHeatmapView())) {
+        renderHeatmapPointOverlays();
+        requestAnimationFrame(loop);
+      } else {
+        // If we switch to Zoning, kill the loop and hide the markers
+        clearHeatmapPointOverlaysNow();
+        heatmapOverlayLoopRunning = false;
       }
     };
-    heatmapOverlayRaf = requestAnimationFrame(run);
+    requestAnimationFrame(loop);
   }
 
 
@@ -3332,7 +3325,9 @@ function onZoneClick(zoneEl, e) {
     });
 
     log('Zone watcher sync complete. zones=', zones.length, 'watchers=', zoneObservers.size);
-    // (Removed repeated applyAllOverrides to prevent infinite logging)
+    
+    // FIX: Force an immediate evaluation of overlays when the DOM mutates (e.g. switching tabs)
+    renderHeatmapPointOverlays();
   }
 
   function applyAllOverrides() {
