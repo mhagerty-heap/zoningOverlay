@@ -7,6 +7,37 @@
 (function () {
   'use strict';
 
+  let metricRegistry = {
+    "attractiveness rate": { min: 5, max: 65, type: "percent" },
+    "click rate (pageview level)": { min: 0.5, max: 12, type: "percent" },
+    "click rate (session level)": { min: 0.8, max: 15, type: "percent" },
+    "click distribution": { min: 1, max: 25, type: "percent" },
+    "exposure rate": { min: 20, max: 100, type: "percent" },
+    "engagement rate": { min: 5, max: 45, type: "percent" },
+    "hover rate": { min: 10, max: 55, type: "percent" },
+    "conversion rate per click": { min: 0.2, max: 6.5, type: "percent_long" },
+    "conversion rate per hover": { min: 0.1, max: 4.5, type: "percent_long" },
+    "purchase - cr per click": { min: 0.3, max: 5.5, type: "percent_long" },
+    "purchase - cr per hover": { min: 0.1, max: 3.5, type: "percent_long" },
+    "time before first click": { min: 3, max: 20, type: "time" },
+    "exposure time": { min: 2, max: 35, type: "time" },
+    "float time": { min: 1, max: 15, type: "time" },
+    "hesitation time": { min: 1.5, max: 12, type: "time" },
+    "revenue": { min: 250, max: 5000, type: "currency" },
+    "revenue per click": { min: 5, max: 150, type: "currency" },
+    "number of clicks": { min: 50, max: 4500, type: "count" },
+    "click recurrence": { min: 1.0, max: 2.5, type: "decimal" }
+  };
+
+  window.__CS_DEBUG__ = {
+    getUrlKey: () => (typeof getUrlKey !== 'undefined' ? getUrlKey() : 'not_loaded'),
+    getOverrides: () => (typeof overrides !== 'undefined' ? overrides : {}),
+    // This will now report the result of our "Double-Drill"
+    readMetric: () => (typeof readCsMetricTypeName !== 'undefined' ? readCsMetricTypeName() : 'not_loaded'),
+    applyNow: () => (typeof applyAllOverrides !== 'undefined' ? applyAllOverrides() : null),
+    syncNow: () => (typeof syncZoneWatchers !== 'undefined' ? syncZoneWatchers() : null)
+  };
+
   const existingInstance = document.documentElement?.getAttribute('data-cs-demo-instance');
   if (existingInstance) {
     return;
@@ -261,18 +292,23 @@
   }
 
   function getUrlKey() {
+    // Priority 1: Use the global activePageKey if set
     if (activePageKey) return activePageKey;
 
-    // Always prefer the CS app URL key, even from preview iframes.
-    if (location.hostname === 'app.contentsquare.com') {
-      return normalizeCsUrlKey(location.href);
+    // Priority 2: Extract Report ID from the URL (The most stable ID)
+    const url = window.location.href;
+    const reportMatch = url.match(/\/zoning-v2\/(\d+)/) || url.match(/\/report\/(\d+)/);
+    if (reportMatch && reportMatch[1]) {
+      return `cs-report-${reportMatch[1]}`;
     }
 
-    const fromReferrer = getCsAppUrlFromReferrer();
-    if (fromReferrer) return fromReferrer;
+    // Priority 3: Project + Snapshot fallback
+    const params = new URLSearchParams(window.location.search || window.top.location.search);
+    const pid = params.get('projectId');
+    const snid = params.get('snapshot');
+    if (pid && snid) return `cs-page-${pid}-${snid}`;
 
-    // Fallback for unexpected contexts.
-    return normalizeCsUrlKey(location.href) || (location.origin + location.pathname);
+    return normalizeCsUrlKey(url);
   }
 
   function loadOverrides() {
@@ -2288,32 +2324,43 @@
   }
 
   // ─── ZONE MANIPULATION ───────────────────────────────────────────────────
-
   function applyOverride(el, override) {
+    if (!override) return;
     appliedOverrideFlag = true;
     try {
-      // Keep a per-element backup so reset can recover even if key matching changes.
+      // 1. CAPTURE ORIGINALS (including color!)
       if (!el.hasAttribute('data-cs-demo-orig-metric')) {
-        el.setAttribute('data-cs-demo-orig-metric', String(el.getAttribute('metric') || ''));
-        if (el.hasAttribute('value')) el.setAttribute('data-cs-demo-orig-value', String(el.getAttribute('value') || ''));
-        if (el.hasAttribute('color')) el.setAttribute('data-cs-demo-orig-color', String(el.getAttribute('color') || ''));
-      }
-
-      el.setAttribute('metric', override.metric);
-      if (override.value !== undefined && !isNaN(Number(override.value))) {
-        el.setAttribute('value', String(override.value));
-        const derivedColor = getDerivedZoneColor(el, Number(override.value));
-        if (derivedColor) {
-          el.setAttribute('color', derivedColor);
+        el.setAttribute('data-cs-demo-orig-metric', el.getAttribute('metric') || '');
+        
+        if (el.hasAttribute('value')) {
+          el.setAttribute('data-cs-demo-orig-value', String(el.getAttribute('value') || ''));
+        }
+        
+        // ADD THIS LINE: Capture the native CSQ color before we overwrite it
+        if (el.hasAttribute('color')) {
+          el.setAttribute('data-cs-demo-orig-color', String(el.getAttribute('color') || ''));
         }
       }
-      // Visual edited indicator (outline, not blocked by CSP — programmatic CSSOM)
+
+      // 2. APPLY OVERRIDE
+      const metricDisplay = typeof override === 'object' ? override.metric : override;
+      const valueNum = typeof override === 'object' ? override.value : undefined;
+
+      el.setAttribute('metric', metricDisplay);
+      
+      if (valueNum !== undefined && !isNaN(Number(valueNum))) {
+        el.setAttribute('value', String(valueNum));
+        const derivedColor = getDerivedZoneColor(el, Number(valueNum));
+        if (derivedColor) el.setAttribute('color', derivedColor);
+      }
+      
       el.style.outline = '2px dashed rgba(255, 210, 50, 0.9)';
       el.style.outlineOffset = '-2px';
     } finally {
       setTimeout(() => { appliedOverrideFlag = false; }, 0);
     }
   }
+
 
   function clearEditedStyle(el) {
     el.style.outline = '';
@@ -2760,130 +2807,37 @@
   //  2. Known CS DOM selectors for the active metric pill / dropdown button
   //  3. Text-scan of the page for known CS metric names
   // Returns an empty string when nothing can be found.
-  function readCsMetricTypeName(paneSide = 'left') {
-    if (!isTopFrame) return csMetricTypeName; 
+  function readCsMetricTypeName() {
+  // Only the Top Frame should perform the heavy lifting of the Double-Drill
+  if (!isTopFrame) return (csMetricTypeName || "").toLowerCase();
 
-    const isRightTarget = paneSide === 'right';
-    const center = window.innerWidth / 2;
-
-    // SPATIAL DOM MATH: Filters elements based on left/right screen halves
-    function isCorrectSide(el) {
-      if (!el || !el.getBoundingClientRect) return false;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0) return false;
-      const elIsRight = (rect.left + rect.width / 2) > center;
-      return elIsRight === isRightTarget;
-    }
-
-    if (!isRightTarget) {
-      try {
-        const hash = location.hash || '';
-        const qIdx = hash.indexOf('?');
-        if (qIdx !== -1) {
-          const params = new URLSearchParams(hash.slice(qIdx + 1));
-          const raw = params.get('metric') || params.get('indicator') || params.get('kpi') || '';
-          if (raw) return raw.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        }
-      } catch (_) {}
-    }
-
-    const domSelectors = [
-      'div.metric-selector-trigger span', 'div[class*="metric-selector-trigger"] span',
-      'csm-universal-select[class*="metric-selector"] span', '[class*="metric-selector"] [class*="active"]',
-      '[class*="metric-selector"] [aria-selected="true"]', '[class*="kpi-selector"] [class*="selected"]',
-      '[class*="kpi-selector"] [aria-selected="true"]', '[class*="metric-dropdown"] [class*="trigger"]',
-      '[class*="metric-dropdown"] button', '[class*="metrics"] [class*="active"]',
-      '[class*="indicators"] [class*="active"]', 'cq-metric-selector [selected]',
-      'cq-metric-selector [active]', '[role="option"][aria-selected="true"]', '[role="tab"][aria-selected="true"]'
-    ];
-
-    const knownMetricNames = [
-      'Click Rate', 'Attractiveness Rate', 'Engagement Rate', 'Exposure Rate', 'Activity Rate', 'Conversion Rate',
-      'Revenue', 'Transactions', 'Revenue per Session', 'Time on Page', 'Scroll Depth', 'Bounce Rate',
-      'Page Views', 'Sessions', 'Unique Visitors', 'Add to Cart Rate', 'Product Detail Views'
-    ];
-
-    function normalizeCandidate(text) {
-      const raw = normalizeMetricTypeName(text);
-      if (!raw) return '';
-      const lower = raw.toLowerCase();
-      const known = knownMetricNames.find(name => lower.includes(name.toLowerCase()));
-      if (known) return known;
-      if (/^[\d\s.,%$€£¥-]+$/.test(raw) || (/\d/.test(raw) && /[%$€£¥]/.test(raw)) || raw.length > 64) return '';
-      if (/(rate|revenue|transaction|session|page view|visitor|bounce|scroll|engagement|attractiveness|activity|exposure|conversion|cart|time)/i.test(raw)) return raw;
-      return '';
-    }
-
-    function queryAllDeep(selector, root = document, out = []) {
-      if (!root || !root.querySelectorAll) return out;
-      root.querySelectorAll(selector).forEach(el => out.push(el));
-      root.querySelectorAll('*').forEach(el => {
-        if (el.shadowRoot) queryAllDeep(selector, el.shadowRoot, out);
+  try {
+    // Layer 1: Pierce the main App container
+    const root1 = document.querySelector('app-zonings')?.shadowRoot;
+    
+    // Layer 2: Pierce the Metric Selector component inside Layer 1
+    const root2 = root1?.querySelector('metrics-metric-selector')?.shadowRoot;
+    
+    // Layer 3: Grab the specific span text
+    const span = root2?.querySelector('.metric-selector-trigger span');
+    const found = span?.textContent?.trim()?.toLowerCase() || "";
+    
+    if (found && found !== csMetricTypeName) {
+      csMetricTypeName = found;
+      console.log(`[CS Debug] ✅ Double-Drill Resolved: "${found}"`);
+      
+      // BROADCAST: Tell the subframes (the ones painting the zones) the new name
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: { type: 'syncMetricName', name: found }
       });
-      return out;
     }
-
-    try {
-      const triggerCandidates = queryAllDeep('div.metric-selector-trigger, div[class*="metric-selector-trigger"]');
-      for (const trigger of triggerCandidates) {
-        if (!isCorrectSide(trigger)) continue; // Only check the correct side
-        const text = trigger.textContent || '';
-        const label = normalizeCandidate(text);
-        if (label) return label;
-      }
-    } catch (_) {}
-
-    for (const sel of domSelectors) {
-      try {
-        const candidates = queryAllDeep(sel);
-        for (const el of candidates) {
-          if (!isCorrectSide(el)) continue; // Only check the correct side
-          const text = [ el.textContent, el.getAttribute?.('aria-label'), el.getAttribute?.('title') ].filter(Boolean).join(' ');
-          const label = normalizeCandidate(text);
-          if (label) return label;
-        }
-      } catch (_) {}
-    }
-
-    try {
-      const allEls = queryAllDeep('*');
-      let best = null;
-
-      function scoreElement(el, metricName) {
-        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!text) return -Infinity;
-        const lowText = text.toLowerCase();
-        const lowMetric = metricName.toLowerCase();
-        if (!lowText.includes(lowMetric)) return -Infinity;
-
-        let score = 0;
-        if (lowText === lowMetric) score += 4;
-        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-        if (rect && rect.width > 0 && rect.height > 0) score += 2;
-
-        if (el.getAttribute?.('aria-selected') === 'true') score += 8;
-        if (el.getAttribute?.('aria-current') && el.getAttribute?.('aria-current') !== 'false') score += 6;
-        if (el.getAttribute?.('data-selected') === 'true') score += 6;
-        if (el.hasAttribute?.('selected')) score += 6;
-        if (/^(tab|option|radio|menuitemradio)$/.test((el.getAttribute?.('role') || '').toLowerCase())) score += 3;
-        if (/(active|selected|current|checked)/.test(String(el.className || '').toLowerCase())) score += 4;
-        if (text.length > metricName.length + 40) score -= 3;
-        return score;
-      }
-
-      for (const metricName of knownMetricNames) {
-        for (const el of allEls) {
-          if (!isCorrectSide(el)) continue; // Only check the correct side
-          const s = scoreElement(el, metricName);
-          if (!Number.isFinite(s)) continue;
-          if (!best || s > best.score) best = { score: s, metricName };
-        }
-      }
-      if (best && best.score >= 8) return best.metricName;
-    } catch (_) {}
-
-    return '';
+  } catch (e) {
+    // Silent fail if the UI hasn't rendered yet
   }
+
+  return (csMetricTypeName || "").toLowerCase();
+}
 
   function refreshMetricTypeName() {
     const found = readCsMetricTypeName();
@@ -2992,25 +2946,25 @@
     const zoneKey = getZoneKey(el);
     if (!zoneKey) return null;
 
-    const curMetric = (el.getAttribute('metric') || '').trim();
-    const prefix = zoneKey + '@';
+    // Use the most recent metric name we've synced from the top frame
+    const activeMetricName = csMetricTypeName || "";
 
-    for (const [key, ov] of Object.entries(overrides)) {
-      if (key.startsWith(prefix)) {
-        // Match even if the metric is currently loading/empty
-        if (ov.origMetric === curMetric || ov.metric === curMetric || curMetric === '—' || curMetric === '') {
-          return { key, override: ov };
-        }
+    if (activeMetricName) {
+      const metricAwareKey = `${zoneKey}@${activeMetricName}`;
+      if (overrides[metricAwareKey]) {
+        return { key: metricAwareKey, override: overrides[metricAwareKey] };
       }
     }
-    
-    // CORE FIX: This legacy check MUST be outside the for-loop!
-    if (overrides[zoneKey]) return { key: zoneKey, override: overrides[zoneKey] };
+
+    // Fallback for manual/generic edits
+    if (overrides[zoneKey]) {
+      return { key: zoneKey, override: overrides[zoneKey] };
+    }
     
     return null;
   }
 
-function onZoneClick(zoneEl, e) {
+  function onZoneClick(zoneEl, e) {
     if (!editMode || !zoneEl || !uiVisible) return;
     const editorState = buildEditorState(zoneEl, e); // Pass the mouse event!
 
@@ -3145,7 +3099,7 @@ function onZoneClick(zoneEl, e) {
     const rawOrigValue = existingOv?.origValue ?? el.getAttribute('value');
     const origValue = rawOrigValue === null ? undefined : rawOrigValue;
     const rawOrigColor = existingOv?.origColor ?? el.getAttribute('color');
-    const origColor = rawOrigColor === null ? undefined : rawOrigColor;
+    const origColor = (rawOrigColor === null || rawOrigColor === undefined) ? '' : String(rawOrigColor);
 
     if (existing && existing.key !== getMetricBasedKey(resolvedZoneKey, origMetric)) {
       delete overrides[existing.key];
@@ -3176,109 +3130,41 @@ function onZoneClick(zoneEl, e) {
     persistOverrides();
   }
 
-  // function watchZone(el) {
-  //   const zoneKey = getZoneKey(el);
-  //   if (!zoneKey) return;
-
-  //   const existingWatcher = zoneObservers.get(zoneKey);
-  //   if (existingWatcher && existingWatcher.element === el) {
-  //     return;
-  //   }
-
-  //   // If key is reused for a replacement DOM node, tear down old watcher first.
-  //   if (existingWatcher && existingWatcher.element !== el) {
-  //     existingWatcher.observer.disconnect();
-  //     existingWatcher.element.removeEventListener('click', onZoneElementClick, true);
-  //     zoneObservers.delete(zoneKey);
-  //   }
-
-  //   migrateLegacyOverrideIfNeeded(el);
-
-  //   // Apply any stored override immediately
-  //   const existingOverride = getOverrideForElement(el);
-  //   if (existingOverride) {
-  //     applyOverride(el, existingOverride.override);
-  //   }
-
-  //   // Watch for the CS app overwriting our changes (e.g. on metric switch)
-  //   const mo = new MutationObserver(() => {
-  //     if (appliedOverrideFlag) return;
-  //     const existing = getOverrideForElement(el);
-  //     if (!existing) return;
-  //     const ov = existing.override;
-  //     const curMetric = el.getAttribute('metric');
-  //     if (curMetric !== ov.metric) {
-  //       // CS reset our value — reapply
-  //       requestAnimationFrame(() => applyOverride(el, ov));
-  //     }
-  //   });
-  //   mo.observe(el, { attributes: true, attributeFilter: ['metric', 'value', 'status'] });
-  //   zoneObservers.set(zoneKey, { observer: mo, element: el });
-
-  //   // Keep element-level capture listeners for iframe/shadow contexts.
-  //   ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
-  //     el.addEventListener(type, onZoneElementClick, true);
-  //   });
-  // }
-
-  // function unwatchZone(el) {
-  //   const zoneKey = getZoneKey(el);
-  //   if (!zoneKey) return;
-  //   const entry = zoneObservers.get(zoneKey);
-  //   if (entry && entry.element === el) {
-  //     entry.observer.disconnect();
-  //     zoneObservers.delete(zoneKey);
-  //   }
-  //   ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
-  //     el.removeEventListener(type, onZoneElementClick, true);
-  //   });
-  // }
-
   function watchZone(el) {
     const zoneKey = getZoneKey(el);
     if (!zoneKey) return;
 
     const existingWatcher = zoneObservers.get(zoneKey);
-    if (existingWatcher && existingWatcher.element === el) {
-      return;
-    }
+    if (existingWatcher && existingWatcher.element === el) return;
 
-    // If key is reused for a replacement DOM node, tear down old watcher first.
     if (existingWatcher && existingWatcher.element !== el) {
       existingWatcher.observer.disconnect();
-      // Remove listeners from the old element to prevent memory leaks or duplicate triggers
       ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
         existingWatcher.element.removeEventListener(type, onZoneElementClick, true);
       });
       zoneObservers.delete(zoneKey);
     }
 
-    migrateLegacyOverrideIfNeeded(el);
+    const match = getOverrideForElement(el);
+    if (match) applyOverride(el, match.override);
 
-    // APPLY IMMEDIATELY: This ensures overrides are persistent on page discovery/reload
-    const existingOverride = getOverrideForElement(el);
-    if (existingOverride) {
-      applyOverride(el, existingOverride.override);
-    }
+    const mo = new MutationObserver((mutations) => {
+      if (appliedOverrideFlag) return; // Don't react to our own edits
 
-    // Set up MutationObserver to watch for the CS app resetting values (e.g., on metric switch)
-    const mo = new MutationObserver(() => {
-      if (appliedOverrideFlag) return;
-      const existing = getOverrideForElement(el);
-      if (!existing) return;
-      const ov = existing.override;
-      const curMetric = el.getAttribute('metric');
-      
-      if (curMetric !== ov.metric) {
-        // If Contentsquare resets the value, re-apply the override on the next frame
-        requestAnimationFrame(() => applyOverride(el, ov));
+      const match = getOverrideForElement(el);
+      if (match) {
+        const ov = match.override;
+        // If the current metric on screen doesn't match our override, FORCE IT BACK
+        if (el.getAttribute('metric') !== ov.metric) {
+          applyOverride(el, ov); 
+        }
       }
     });
     
-    mo.observe(el, { attributes: true, attributeFilter: ['metric', 'value', 'status'] });
+    mo.observe(el, { attributes: true, attributeFilter: ['metric', 'value'] });
+
     zoneObservers.set(zoneKey, { observer: mo, element: el });
 
-    // Attach listeners for editing interactions
     ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
       el.addEventListener(type, onZoneElementClick, true);
     });
@@ -4850,64 +4736,68 @@ function onZoneClick(zoneEl, e) {
   }
 
   // ─── RESET ALL ───────────────────────────────────────────────────────────
-
-  async function resetAllInFrame() {
-    // Reset zones and heatmap points in this frame
+  const resetAllInFrame = async () => {
     const zoneEls = getAllZoneElements();
+    
     zoneEls.forEach(el => {
-      const existing = getOverrideForElement(el);
-      if (existing) {
-        const orig = existing.override;
-        if (orig.origMetric !== undefined) {
-          el.setAttribute('metric', orig.origMetric);
-          // NEW FIX: If it didn't have a value before, completely strip the attribute now
-          if (orig.origValue !== undefined) el.setAttribute('value', String(orig.origValue));
-          else el.removeAttribute('value'); 
-          
-          if (orig.origColor !== undefined) el.setAttribute('color', String(orig.origColor));
-          else el.removeAttribute('color');
+      // 1. RESTORE ORIGINALS
+      // If we captured real data, put it back.
+      if (el.hasAttribute('data-cs-demo-orig-metric')) {
+        const origMetric = el.getAttribute('data-cs-demo-orig-metric');
+        const origValue = el.getAttribute('data-cs-demo-orig-value');
+        const origColor = el.getAttribute('data-cs-demo-orig-color');
+
+        // Only set attributes if they weren't empty strings to begin with
+        if (origMetric) el.setAttribute('metric', origMetric);
+        
+        if (origValue !== null && origValue !== "null") {
+          el.setAttribute('value', origValue);
+        } else {
+          el.removeAttribute('value');
         }
-      } else if (el.hasAttribute('data-cs-demo-orig-metric')) {
-        const origMetric = String(el.getAttribute('data-cs-demo-orig-metric') || '');
-        const hasOrigValue = el.hasAttribute('data-cs-demo-orig-value');
-        const hasOrigColor = el.hasAttribute('data-cs-demo-orig-color');
-        el.setAttribute('metric', origMetric);
-        if (hasOrigValue) el.setAttribute('value', String(el.getAttribute('data-cs-demo-orig-value') || ''));
-        else el.removeAttribute('value');
-        if (hasOrigColor) el.setAttribute('color', String(el.getAttribute('data-cs-demo-orig-color') || ''));
-        else el.removeAttribute('color');
+
+        if (origColor && origColor !== "null") {
+          el.setAttribute('color', origColor);
+        } else {
+          // If there was no original color, let CSQ decide
+          el.removeAttribute('color');
+        }
       }
 
+      // 2. ONLY REMOVE OUR TRACKING MARKERS
+      // We STOP removing 'metric', 'value', and 'color' here 
+      // unless we specifically put them there ourselves.
       el.removeAttribute('data-cs-demo-orig-metric');
       el.removeAttribute('data-cs-demo-orig-value');
       el.removeAttribute('data-cs-demo-orig-color');
+      
       clearEditedStyle(el);
     });
 
+    // 3. INTERNAL CLEANUP
     overrides = {};
     heatmapPointOverrides = {};
-    renderHeatmapPointOverlays();
 
-    // Re-initialize zone watchers cleanly
-    zoneObservers.forEach(entry => {
-      entry.observer.disconnect();
-      entry.element.removeEventListener('click', onZoneElementClick, true);
-    });
+    // 4. GENTLE RE-TRIGGER
+    // We don't hide/show anymore, just a resize event to tell CSQ to refresh
+    window.dispatchEvent(new Event('resize'));
+    
+    zoneObservers.forEach(entry => entry.observer.disconnect());
     zoneObservers.clear();
     syncZoneWatchers();
-  }
+    
+    console.log("[CS Debug] 🧼 Safe Reset: Restored originals and cleared markers.");
+  };
 
-  async function resetAll(skipConfirm) {
+  const resetAll = async (skipConfirm) => {
     const count = getTotalOverrideCount();
     if (count === 0) return;
     
-    // If the message explicitly says to skip the confirm, bypass it. Otherwise, ask.
     if (skipConfirm !== true) {
       if (!confirm(`Reset all ${count} override${count !== 1 ? 's' : ''} on this page?`)) return;
     }
 
     if (isTopFrame) {
-      // Broadcast to all frames (including this one) to reset their zones
       await new Promise(resolve => {
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
@@ -4917,19 +4807,38 @@ function onZoneClick(zoneEl, e) {
           resolve(true);
         });
       });
-      // Also reset locally in case this top frame has zones
       await resetAllInFrame();
       await persistOverrides();
       await persistHeatmapPointOverrides();
     } else {
-      // Subframe: just reset locally
       await resetAllInFrame();
     }
 
     updateToolbar();
-  }
+  };
 
   async function applyBulkFillToCurrentMetric(maxVal, minVal) {
+    if (isTopFrame) {
+      // 1. Force a fresh read immediately when the button is clicked
+      const syncName = readCsMetricTypeName(); 
+      
+      if (!syncName) {
+         console.warn("[CS Debug] Shout aborted: Metric name still empty. Waiting 150ms...");
+         // Give the shadow DOM a moment to be reached if it was just rendered
+         await new Promise(r => setTimeout(r, 150));
+         readCsMetricTypeName(); 
+      }
+
+      // 2. Shout the name to the subframes
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: { type: 'syncMetricName', name: csMetricTypeName }
+      });
+    }
+
+    // 3. Tiny delay for the subframe to receive the message and update its local variable
+    await new Promise(r => setTimeout(r, 100));
+
     refreshMetricTypeName();
     const currentMetricName = String(csMetricTypeName || '').trim();
 
@@ -4940,7 +4849,7 @@ function onZoneClick(zoneEl, e) {
       zoneElements = getCandidateZoneElements();
     }
 
-    // SMART FORMATTING DETECTORS
+    // ... (rest of your logic remains the same below) ...
     let hasPercent = false;
     let hasCurrency = false;
     let hasTime = false;
@@ -4954,11 +4863,10 @@ function onZoneClick(zoneEl, e) {
       const curMetric = (el.getAttribute('metric') || '').trim();
       const curValueAttr = el.getAttribute('value');
 
-      // Sniff the original text for formatting clues
       if (curMetric.includes('%')) hasPercent = true;
       if (/[€$£¥]/.test(curMetric)) hasCurrency = true;
       if (/\d\s*s\b/.test(curMetric) || curMetric.endsWith('s')) hasTime = true;
-      if (/[\.,]\d/.test(curMetric)) hasDecimal = true; // Detects decimals like 1.00 or 0,50
+      if (/[\.,]\d/.test(curMetric)) hasDecimal = true;
 
       let numVal = NaN;
       if (curValueAttr !== null && curValueAttr.trim() !== '') {
@@ -4967,7 +4875,6 @@ function onZoneClick(zoneEl, e) {
         numVal = parseFloat(curMetric.replace(/[^0-9.,-]/g, '').replace(',', '.'));
       }
 
-      // Explicitly catch N/A along with the other zero conditions
       const isZero = curMetric.toUpperCase() === 'N/A' || curMetric.includes('—') || curMetric === '-' || curMetric === '' || isNaN(numVal) || Math.abs(numVal) < 0.1;
 
       if (isZero) {
@@ -4983,7 +4890,6 @@ function onZoneClick(zoneEl, e) {
       return { applied: 0, totalZones: zoneElements.length };
     }
 
-    // Determine final format based on sniffs + metric name heuristics
     const isCurrency = hasCurrency || /(revenue|sales|order|transaction|aov|cart|price)/i.test(currentMetricName);
     const isPercentage = hasPercent || /(rate|ratio|conversion|bounce|engagement|attractiveness|activity|exposure)/i.test(currentMetricName) || currentMetricName.includes('%');
     const isTime = hasTime || /(time|duration|seconds?)/i.test(currentMetricName);
@@ -4994,7 +4900,6 @@ function onZoneClick(zoneEl, e) {
       if (isPercentage) return `${val.toFixed(1)}%`;
       if (isTime) return `${val.toFixed(1)}s`;
       if (isDecimal) return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      // Default integer formatting (e.g., Clicks)
       return Math.round(val).toLocaleString('en-US');
     };
 
@@ -5016,17 +4921,105 @@ function onZoneClick(zoneEl, e) {
       }
       
       const displayMetric = formatMetricValue(numericValue);
+      const metricKey = `${row.zoneKey}@${currentMetricName}`;
       
-      const wrote = upsertZoneOverride(row.el, row.zoneKey, row.zoneId, displayMetric, numericValue, '', currentMetricName);
-      if (wrote) applied++;
+      overrides[metricKey] = { 
+          metric: displayMetric, 
+          value: numericValue, 
+          origMetric: '—', 
+          zoneName: `${currentMetricName} Bulk`, 
+          csMetricTypeName: currentMetricName 
+      };
+
+      applyOverride(row.el, overrides[metricKey]);
+      applied++;
     });
 
     if (applied > 0) {
-      await persistOverrides();
+      await persistOverridesMerged();
       syncZoneWatchers();
       updateToolbar();
     }
     return { applied, totalZones: zoneElements.length };
+  }
+
+  async function generateAllClientMetrics(shout = true) {
+    const shadow = document.querySelector('#cs-demo-exposure-host')?.shadowRoot;
+    if (shadow) {
+      shadow.querySelectorAll('.tuner-inp').forEach(inp => {
+        const name = inp.dataset.metric;
+        const val = parseFloat(inp.value);
+        if (name && metricRegistry[name] && !isNaN(val)) {
+          if (inp.classList.contains('metric-min')) {
+            metricRegistry[name].min = val;
+          } else if (inp.classList.contains('metric-max')) {
+            metricRegistry[name].max = val;
+          }
+        }
+      });
+    }
+
+    if (isTopFrame && shout) {
+      const activeMetric = readCsMetricTypeName(); // Read the name!
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: { 
+          type: 'refresh_from_storage', 
+          updatedRegistry: JSON.parse(JSON.stringify(metricRegistry)),
+          activeMetricName: activeMetric // Send the name so subframes know what to paint!
+        }
+      });
+    }
+
+    const metricsLibrary = Object.entries(metricRegistry).map(([name, config]) => ({
+      name, ...config
+    }));
+
+    let zones = getCandidateZoneElements();
+    if (zones.length === 0) return { ok: true, metricsCount: metricsLibrary.length, zonesCount: 0 };
+
+    const sortedZones = zones.map(el => {
+      const rect = el.getBoundingClientRect();
+      return { el, y: rect.top + rect.height / 2, key: getZoneKey(el) || el.getAttribute('id') };
+    }).sort((a, b) => a.y - b.y);
+
+    metricsLibrary.forEach(m => {
+      sortedZones.forEach((row, index) => {
+        let val = m.max;
+        if (sortedZones.length > 1) {
+          const ratio = index / (sortedZones.length - 1);
+          val = m.max - (ratio * (m.max - m.min));
+        }
+
+        let display;
+        if (m.type === "currency") {
+          display = `$${val.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+        } else if (m.type === "percent" || m.type === "percent_long") {
+          display = `${val.toFixed(m.type === "percent" ? 1 : 2)}%`;
+        } else if (m.type === "time") {
+          display = `${val.toFixed(1)}s`;
+        } else if (m.type === "decimal") {
+          display = val.toFixed(2);
+        } else {
+          display = Math.round(val).toLocaleString();
+        }
+
+        const overrideKey = `${row.key}@${m.name}`;
+        overrides[overrideKey] = { 
+            metric: display, 
+            value: val, 
+            origMetric: '—', 
+            zoneName: `${m.name} Data`, 
+            csMetricTypeName: m.name 
+        };
+      });
+    });
+
+    await persistOverridesMerged(); // Safe merge
+    applyAllOverrides();
+    syncZoneWatchers();
+
+    return { ok: true, metricsCount: metricsLibrary.length, zonesCount: sortedZones.length };
   }
 
   function openExposurePanel() {
@@ -5055,7 +5048,7 @@ function onZoneClick(zoneEl, e) {
         top: 64px;
         right: 20px;
         z-index: 2147483645;
-        width: 300px;
+        width: 320px;
         background: #fff;
         border-radius: 12px;
         box-shadow: 0 8px 32px rgba(0,0,0,0.2), 0 2px 8px rgba(0,0,0,0.1);
@@ -5072,36 +5065,9 @@ function onZoneClick(zoneEl, e) {
         font-weight: 700;
         font-size: 13px;
       }
-      .tabs {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0;
-        border-bottom: 1px solid #ececf6;
-        background: #f8f8ff;
-      }
-      .tab-btn {
-        border: none;
-        border-right: 1px solid #ececf6;
-        background: transparent;
-        color: #63638a;
-        padding: 10px 8px;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0.4px;
-        text-transform: uppercase;
-        cursor: pointer;
-      }
-      .tab-btn:last-child { border-right: none; }
-      .tab-btn.active {
-        background: #fff;
-        color: #2c2c8c;
-        box-shadow: inset 0 -2px 0 #2c2c8c;
-      }
       .tab-content {
-        display: none;
         padding: 14px 16px;
       }
-      .tab-content.active { display: block; }
       .section-label {
         font-size: 10px;
         font-weight: 700;
@@ -5132,10 +5098,50 @@ function onZoneClick(zoneEl, e) {
         border: none;
         font-family: inherit;
         transition: background 0.15s;
+        width: 100%;
       }
-      .btn-apply { background: #2c2c8c; color: #fff; width: 100%; }
+      .btn-apply { background: #2c2c8c; color: #fff; }
       .btn-apply:hover { background: #3c3cac; }
-      .hint { font-size: 11px; color: #666; margin-bottom: 8px; }
+      .hint { font-size: 10px; color: #666; margin-bottom: 8px; }
+      
+      /* Metric Tuner Styles */
+      .metric-tuner-list {
+        max-height: 180px;
+        overflow-y: auto;
+        border: 1px solid #ececf6;
+        border-radius: 8px;
+        padding: 4px;
+        margin-bottom: 12px;
+        background: #fcfcff;
+      }
+      .tuner-row {
+        display: grid;
+        grid-template-columns: 1fr 50px 50px;
+        gap: 6px;
+        align-items: center;
+        padding: 4px 6px;
+        border-bottom: 1px solid #f0f0f8;
+      }
+      .tuner-label {
+        font-size: 10px;
+        font-weight: 600;
+        color: #555;
+        text-transform: capitalize;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .tuner-inp {
+        width: 100%;
+        padding: 3px 5px;
+        border: 1px solid #d0d0e0;
+        border-radius: 4px;
+        font-size: 10px;
+        text-align: center;
+        box-sizing: border-box;
+      }
+
+      /* Exposure Logic Styles (Preserved) */
       .pane-bounds {
         display: none;
         max-height: 140px;
@@ -5182,12 +5188,8 @@ function onZoneClick(zoneEl, e) {
         border-top: 1px solid #eee;
         margin: 12px 0;
       }
-      .tiny {
-        font-size: 10px;
-        color: #777;
-        line-height: 1.35;
-      }
     `);
+
     shadow.adoptedStyleSheets = [sheet];
 
     const panel = document.createElement('div');
@@ -5205,7 +5207,7 @@ function onZoneClick(zoneEl, e) {
       .replace(/"/g, '&quot;');
 
     panel.innerHTML = `
-      <div class="panel-header">⚙️ Advanced</div>
+      <div class="panel-header">⚙️ Advanced Tools</div>
       <div class="tab-content active" style="display: block;">
         
         <div class="section-label" style="color: #2c2c8c;">1. Bulk Fill Current Metric</div>
@@ -5218,9 +5220,25 @@ function onZoneClick(zoneEl, e) {
         
         <hr class="divider">
 
-        <div class="section-label" style="color: #cc3333;">2. Generate All Client Metrics</div>
-        <div class="hint" style="margin-top:-4px; margin-bottom:10px;">(Coming soon) Rebuilds entire page data across all metric types.</div>
-        <button class="btn btn-apply" id="btn-nuclear-fill" disabled style="background: #a0a0b0; border-color: #a0a0b0; cursor: not-allowed; margin-bottom: 4px;">Generate All Data</button>
+        <div class="section-label" style="color: #cc3333;">2. Global Metric Library Tuner</div>
+        <div class="hint" style="margin-top:-4px; margin-bottom:10px;">Adjust bounds before generating the "Nuclear" data story.</div>
+        
+        <div class="metric-tuner-list">
+          <div class="tuner-row" style="position: sticky; top: 0; background: #fff; z-index: 1; border-bottom: 1px solid #ccc; padding-bottom: 2px;">
+            <div class="section-label" style="margin:0">Metric</div>
+            <div class="section-label" style="margin:0; text-align:center;">Min</div>
+            <div class="section-label" style="margin:0; text-align:center;">Max</div>
+          </div>
+          ${Object.entries(metricRegistry).map(([name, config]) => `
+            <div class="tuner-row">
+              <div class="tuner-label" title="${name}">${name}</div>
+              <input class="tuner-inp metric-min" data-metric="${name}" type="number" value="${config.min}">
+              <input class="tuner-inp metric-max" data-metric="${name}" type="number" value="${config.max}">
+            </div>
+          `).join('')}
+        </div>
+
+        <button class="btn btn-apply" id="btn-nuclear-fill" style="background: #cc3333; margin-bottom: 4px;">🚀 Generate All Data</button>
 
         <hr class="divider">
 
@@ -5412,6 +5430,31 @@ function onZoneClick(zoneEl, e) {
         }
       });
     });
+
+    shadow.getElementById('btn-nuclear-fill')?.addEventListener('click', () => {
+      const btn = shadow.getElementById('btn-nuclear-fill');
+      const originalText = btn.textContent;
+      btn.textContent = 'Generating 360° Data...';
+      btn.disabled = true;
+
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: { type: 'generateAllInFrame' }
+      }, (response) => {
+        btn.textContent = originalText;
+        btn.disabled = false;
+        
+        if (response && response.results) {
+            const firstOk = response.results.find(r => r.payload && r.payload.ok);
+            if (firstOk) {
+                alert(`Success! Generated data for ${firstOk.payload.metricsCount} metrics across ${firstOk.payload.zonesCount} zones.`);
+            } else {
+                alert("Could not find any zones to populate.");
+            }
+        }
+      });
+    });
+
 
     document.body.appendChild(host);
 
@@ -6088,6 +6131,48 @@ function onZoneClick(zoneEl, e) {
   // ─── MESSAGE HANDLER (from popup) ────────────────────────────────────────
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+
+    if (msg.type === 'findMeTheUI') {
+      const uiElement = document.querySelector('csm-universal-select');
+      sendResponse({ 
+        found: !!uiElement, 
+        url: window.location.href,
+        frameContext: isTopFrame ? 'top' : 'subframe'
+      });
+      return true;
+    }
+
+    if (msg.type === 'syncMetricName') {
+      csMetricTypeName = msg.name;
+      // This is the "Eureka" moment log for the subframe
+      console.log(`[CS Debug] Radio Tower Success: Subframe received "${csMetricTypeName}"`);
+      return true;
+    }
+
+    if (msg.type === 'refresh_from_storage') {
+      if (msg.activeMetricName) {
+        csMetricTypeName = msg.activeMetricName; // SYNC THE BRAIN: Now the subframe knows what to show
+      }
+      if (msg.updatedRegistry) {
+        metricRegistry = msg.updatedRegistry;
+        generateAllClientMetrics(false);
+      } else {
+        loadOverrides().then(() => {
+          applyAllOverrides();
+          syncZoneWatchers();
+        });
+      }
+      return true;
+    }
+
+    if (msg.type === 'syncZonesNow') {
+      loadOverrides().then(() => {
+        syncZoneWatchers();
+        applyAllOverrides();
+      });
+      return true;
+    }
+
     if (msg.type === 'ping') {
       sendResponse({ ok: true, frameContextKey, isTopFrame });
       return true;
@@ -6197,6 +6282,18 @@ function onZoneClick(zoneEl, e) {
         sendResponse({ ok: true, frame: frameContextKey, ...result });
       });
       return true; // Keep channel open for async
+    }
+
+    if (msg.type === 'generateAllInFrame') {
+      // ONLY Top Frame runs the initial math. Subframes will wait for the 'refresh_from_storage' shout.
+      if (isTopFrame) {
+        generateAllClientMetrics(true).then(result => {
+          sendResponse({ ...result, frame: frameContextKey });
+        });
+      } else {
+        sendResponse({ ok: true, skipped: true, frame: frameContextKey });
+      }
+      return true; 
     }
 
     if (msg.type === 'applyExposureGradientInFrame') {
@@ -6987,6 +7084,7 @@ function onZoneClick(zoneEl, e) {
 // ─── INIT ─────────────────────────────────────────────────────────────────
 
   async function init() {
+
     // 1. MutationObserver: apply overrides when zone elements appear
     let observer = null;
     function checkAndApplyOverrides() {
@@ -7085,9 +7183,6 @@ function onZoneClick(zoneEl, e) {
     
     startObserverWhenBodyReady();
   }
-
-
-
 
   init();
 })();
