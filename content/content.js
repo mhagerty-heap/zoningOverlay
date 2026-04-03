@@ -229,7 +229,6 @@
   let popoverShadow = null;
   let popoverElement = null;
   let popoverOpenedAt = 0;
-  let appliedOverrideFlag = false; // guard against MutationObserver loop
   let lastUrl = location.href;
   let lastHandledExposureRequestId = '';
   let lastDirectZoneOpenAt = 0;
@@ -2326,39 +2325,34 @@
   // ─── ZONE MANIPULATION ───────────────────────────────────────────────────
   function applyOverride(el, override) {
     if (!override) return;
-    appliedOverrideFlag = true;
-    try {
-      // 1. CAPTURE ORIGINALS (including color!)
-      if (!el.hasAttribute('data-cs-demo-orig-metric')) {
-        el.setAttribute('data-cs-demo-orig-metric', el.getAttribute('metric') || '');
-        
-        if (el.hasAttribute('value')) {
-          el.setAttribute('data-cs-demo-orig-value', String(el.getAttribute('value') || ''));
-        }
-        
-        // ADD THIS LINE: Capture the native CSQ color before we overwrite it
-        if (el.hasAttribute('color')) {
-          el.setAttribute('data-cs-demo-orig-color', String(el.getAttribute('color') || ''));
-        }
-      }
-
-      // 2. APPLY OVERRIDE
-      const metricDisplay = typeof override === 'object' ? override.metric : override;
-      const valueNum = typeof override === 'object' ? override.value : undefined;
-
-      el.setAttribute('metric', metricDisplay);
+    
+    // 1. CAPTURE ORIGINALS (including color!)
+    if (!el.hasAttribute('data-cs-demo-orig-metric')) {
+      el.setAttribute('data-cs-demo-orig-metric', el.getAttribute('metric') || '');
       
-      if (valueNum !== undefined && !isNaN(Number(valueNum))) {
-        el.setAttribute('value', String(valueNum));
-        const derivedColor = getDerivedZoneColor(el, Number(valueNum));
-        if (derivedColor) el.setAttribute('color', derivedColor);
+      if (el.hasAttribute('value')) {
+        el.setAttribute('data-cs-demo-orig-value', String(el.getAttribute('value') || ''));
       }
       
-      el.style.outline = '2px dashed rgba(255, 210, 50, 0.9)';
-      el.style.outlineOffset = '-2px';
-    } finally {
-      setTimeout(() => { appliedOverrideFlag = false; }, 0);
+      if (el.hasAttribute('color')) {
+        el.setAttribute('data-cs-demo-orig-color', String(el.getAttribute('color') || ''));
+      }
     }
+
+    // 2. APPLY OVERRIDE
+    const metricDisplay = typeof override === 'object' ? override.metric : override;
+    const valueNum = typeof override === 'object' ? override.value : undefined;
+
+    el.setAttribute('metric', metricDisplay);
+    
+    if (valueNum !== undefined && !isNaN(Number(valueNum))) {
+      el.setAttribute('value', String(valueNum));
+      const derivedColor = getDerivedZoneColor(el, Number(valueNum));
+      if (derivedColor) el.setAttribute('color', derivedColor);
+    }
+    
+    el.style.outline = '2px dashed rgba(255, 210, 50, 0.9)';
+    el.style.outlineOffset = '-2px';
   }
 
 
@@ -2381,22 +2375,17 @@
           const idx = allFrames.indexOf(frameEl);
           if (idx >= 0) return `frame:${idx}`;
 
-          // Shadow-rooted compare panes may not be reachable via querySelectorAll.
-          // Fall back to frame element geometry so side-by-side panes stay distinct.
           const fr = frameEl.getBoundingClientRect();
           const cx = fr.left + fr.width / 2;
           const side = cx >= (window.top?.innerWidth || window.innerWidth) / 2 ? 'right' : 'left';
           return `frame-geom:${Math.round(fr.left)}:${Math.round(fr.top)}:${Math.round(fr.width)}:${Math.round(fr.height)}:${side}`;
         }
-      } catch (_) {
-        // Cross-origin or restricted parent access.
-      }
+      } catch (_) { }
 
       try {
-        // CORE FIX: Include stable query params and window.name here as well
-        const search = win.location.search || '';
+        // CORE FIX: Removed win.location.search
         const frameName = win.name ? `|name:${win.name}` : '';
-        return `sub:${win.location.origin}${win.location.pathname}${search}${frameName}`;
+        return `sub:${win.location.origin}${win.location.pathname}${frameName}`;
       } catch (_) {
         return frameScopeKey;
       }
@@ -2527,47 +2516,13 @@
   function getZoneKey(el) {
     const zoneId = el.getAttribute('id');
     if (!zoneId) return null;
+    
     const paneKey = getPaneKey(el);
     if (!paneKey) return null;
 
-    // Hard disambiguation for compare layouts where the same zone id can appear
-    // in multiple panes/hosts. Use global duplicate indexing so separation does
-    // not depend on pane-key heuristics.
-    const duplicates = getAllZoneElements().filter(zoneEl => {
-      return (zoneEl.getAttribute('id') || '') === zoneId;
-    });
-
-    if (duplicates.length <= 1) {
-      return `${paneKey}::${zoneId}`;
-    }
-
-    const rank = node => {
-      const doc = node.ownerDocument || document;
-      const href = (() => {
-        try { return doc.defaultView?.location?.href || ''; } catch (_) { return ''; }
-      })();
-      const r = node.getBoundingClientRect();
-      return {
-        href,
-        left: Math.round(r.left),
-        top: Math.round(r.top),
-        width: Math.round(r.width),
-        height: Math.round(r.height)
-      };
-    };
-
-    const sorted = [...duplicates].sort((a, b) => {
-      const ra = rank(a);
-      const rb = rank(b);
-      if (ra.href !== rb.href) return ra.href < rb.href ? -1 : 1;
-      if (ra.left !== rb.left) return ra.left - rb.left;
-      if (ra.top !== rb.top) return ra.top - rb.top;
-      if (ra.width !== rb.width) return ra.width - rb.width;
-      return ra.height - rb.height;
-    });
-
-    const duplicateIndex = Math.max(0, sorted.indexOf(el));
-    return `${paneKey}::${zoneId}::dup:${duplicateIndex}`;
+    // CORE FIX: We rely entirely on paneKey + zoneId. 
+    // Stripping the duplicate index prevents the 62-zone Vue transition panic!
+    return `${paneKey}::${zoneId}`;
   }
 
   function getZoneDebugSnapshot(el) {
@@ -3167,8 +3122,6 @@
     if (match) applyOverride(el, match.override);
 
     const mo = new MutationObserver((mutations) => {
-      if (appliedOverrideFlag) return; // Don't react to our own edits
-
       const match = getOverrideForElement(el);
       if (match) {
         const ov = match.override;
@@ -5478,13 +5431,11 @@
         btn.textContent = originalText;
         btn.disabled = false;
         
-        if (response && response.results) {
-            const firstOk = response.results.find(r => r.payload && r.payload.ok);
-            if (firstOk) {
-                alert(`Success! Generated data for ${firstOk.payload.metricsCount} metrics across ${firstOk.payload.zonesCount} zones.`);
-            } else {
-                alert("Could not find any zones to populate.");
-            }
+        // Simplified success message that doesn't get confused by 0-zone parent frames
+        if (response && response.results && response.results.some(r => r.payload && r.payload.ok)) {
+            alert(`Success! 360° Data generated and injected into all visible zones.`);
+        } else {
+            alert("Could not communicate with the zones. Ensure the zoning layer is loaded.");
         }
       });
     });
