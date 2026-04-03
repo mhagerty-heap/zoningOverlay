@@ -24,7 +24,7 @@ A Chrome extension designed for PreSales and Solution Consulting teams to easily
 2.  The extension will automatically inject a toolbar at the bottom of your screen.
 3.  Toggle **"Edit Zones"** to enable interaction.
 4.  **Click** on any highlighted zone to open the editor popover and enter a new value.
-5.  **Shift + Click** on the page to add a fake heatmap interaction point.
+5.  **Add Heatmap Points**: With Edit Mode ON and the page set to Heatmap view, simply **Click** anywhere on the page to drop a fake heatmap interaction point. A popover will appear to let you configure the click volume and intensity.
 
 ### Advanced Tools
 
