@@ -2775,20 +2775,14 @@
         }
       }
 
-      // CRITICAL FIX: Broadcast if the text changed OR if we are forcing a shout
       if (found && (found !== csMetricTypeName || forceShout)) {
-        // Only log when it actually changes to avoid spamming the console
-        if (found !== csMetricTypeName) {
-            console.log(`[CS Debug] 🎯 Precision Scraper Resolved: "${found}"`);
-        }
-        
         csMetricTypeName = found;
         applyAllOverrides();
 
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
           payload: { type: 'syncMetricName', name: found }
-        }, () => { void chrome.runtime.lastError; }); // Suppress harmless closed port errors
+        }, () => { void chrome.runtime.lastError; }); 
       }
     } catch (e) {
       // Silent fail during heavy DOM transitions
@@ -4757,7 +4751,7 @@
     zoneObservers.clear();
     syncZoneWatchers();
     
-    console.log("[CS Debug] 🧼 Safe Reset: Restored originals and cleared markers.");
+    //console.log("[CS Debug] 🧼 Safe Reset: Restored originals and cleared markers.");
   };
 
   const resetAll = async (skipConfirm) => {
@@ -4794,7 +4788,7 @@
       const syncName = readCsMetricTypeName(); 
       
       if (!syncName) {
-         console.warn("[CS Debug] Shout aborted: Metric name still empty. Waiting 150ms...");
+         //console.warn("[CS Debug] Shout aborted: Metric name still empty. Waiting 150ms...");
          // Give the shadow DOM a moment to be reached if it was just rendered
          await new Promise(r => setTimeout(r, 150));
          readCsMetricTypeName(); 
@@ -6082,24 +6076,13 @@
   function startAggressiveZonePolling() {
     if (spaTransitionPoll) clearInterval(spaTransitionPoll);
     let pollCount = 0;
-    let hasFoundZones = false;
-    
-    console.log(`[CS Debug] 🔄 SPA Poller Started in [${frameTag}]`);
 
     spaTransitionPoll = setInterval(() => {
       pollCount++;
       
-      // CRITICAL FIX: Force the Top Frame to shout the metric name to the subframes!
       if (isTopFrame) readCsMetricTypeName(true);
       
       const zones = getAllZoneElements();
-
-      if (zones.length > 0 && !hasFoundZones) {
-        console.log(`[CS Debug] ✅ Zones detected in [${frameTag}] on tick ${pollCount}. Applying overrides!`);
-        hasFoundZones = true;
-      } else if (zones.length === 0 && pollCount % 10 === 0) {
-        console.log(`[CS Debug] ⏱️ Tick ${pollCount}/40 in [${frameTag}] - Still 0 zones...`);
-      }
 
       if (zones.length > 0) {
         applyAllOverrides();
@@ -6107,18 +6090,17 @@
         updateToolbar();
       }
 
+      // Stop checking after 20 seconds to save CPU
       if (pollCount > 40) {
-        console.log(`[CS Debug] 🛑 SPA Poller finished in [${frameTag}]`);
         clearInterval(spaTransitionPoll); 
       }
     }, 500);
   }
 
   // ─── SPA URL CHANGE DETECTION ────────────────────────────────────────────
-function handleUrlChange() {
+  function handleUrlChange() {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
-    console.log(`[CS Debug] 🔀 URL changed in [${frameTag}] -> ${lastUrl}`);
 
     if (isTopFrame && location.hostname === 'app.contentsquare.com') {
       const nextKey = normalizeCsUrlKey(location.href);
@@ -6159,7 +6141,7 @@ function handleUrlChange() {
 
     if (msg.type === 'syncMetricName') {
       csMetricTypeName = msg.name;
-      console.log(`[CS Debug] Radio Tower Success: Subframe received "${csMetricTypeName}". Repainting...`);
+      //console.log(`[CS Debug] Radio Tower Success: Subframe received "${csMetricTypeName}". Repainting...`);
       
       // NEW: Now that the subframe knows the new name, force it to repaint the zones!
       applyAllOverrides(); 
