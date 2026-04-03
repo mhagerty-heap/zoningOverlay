@@ -2756,13 +2756,28 @@
       .trim();
   }
 
-  // Attempts to read the current CS metric type name (e.g. "Click Rate", "Attractiveness Rate")
+  let csActiveMetrics = { left: "", right: "", global: "" };
+  let isCompareMode = false;
+
+  function getActiveMetricForZone(zoneKey) {
+    if (!isCompareMode) return (csMetricTypeName || "").toLowerCase();
+    
+    // BULLETPROOF: If the Top Frame whispered our identity, use it!
+    if (window.__csDemoPaneSide === 'right') return csActiveMetrics.right;
+    if (window.__csDemoPaneSide === 'left') return csActiveMetrics.left;
+    
+    // Fallback for Top Frame zones
+    return (zoneKey && (zoneKey.includes('cmp-side:right') || zoneKey.includes('side:right'))) 
+      ? csActiveMetrics.right 
+      : csActiveMetrics.left;
+  }
+
   function readCsMetricTypeName(forceShout = false) {
     if (!isTopFrame) return (csMetricTypeName || "").toLowerCase();
 
     try {
-      let found = "";
       const triggers = getAllElementsBySelector('.metric-selector-trigger, [data-testid*="metric-selector"]');
+      const visibleTriggers = [];
       
       for (const t of triggers) {
         const span = t.querySelector('span') || t;
@@ -2770,23 +2785,61 @@
         const rect = t.getBoundingClientRect();
         
         if (text && text !== 'select metric' && rect.width > 0 && rect.height > 0) {
-          found = text;
-          break; 
+          visibleTriggers.push({ text, rect });
         }
       }
 
-      if (found && (found !== csMetricTypeName || forceShout)) {
-        csMetricTypeName = found;
+      let changed = false;
+      let newMetrics = { left: "", right: "", global: "" };
+      let newCompareMode = visibleTriggers.length > 1;
+
+      if (newCompareMode) {
+        visibleTriggers.sort((a, b) => a.rect.left - b.rect.left);
+        newMetrics.left = visibleTriggers[0].text;
+        newMetrics.right = visibleTriggers[visibleTriggers.length - 1].text;
+        newMetrics.global = newMetrics.left; 
+
+        // BULLETPROOF WHISPER: Pierce the shadow DOM to find the massive compare iframes!
+        const iframes = getAllElementsByTag('iframe').filter(f => {
+           try { 
+             const r = f.getBoundingClientRect();
+             // Filter out tiny hidden tracking iframes. Compare iframes are massive.
+             return r.width > window.innerWidth * 0.25; 
+           } catch(e) { return false; }
+        });
+        
+        iframes.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+        if (iframes.length >= 2) {
+           iframes[0].contentWindow?.postMessage({ __csDemoPaneSide: 'left' }, '*');
+           iframes[iframes.length - 1].contentWindow?.postMessage({ __csDemoPaneSide: 'right' }, '*');
+        }
+
+      } else if (visibleTriggers.length === 1) {
+        newMetrics.global = visibleTriggers[0].text;
+        newMetrics.left = visibleTriggers[0].text;
+        newMetrics.right = visibleTriggers[0].text;
+      }
+
+      if (newMetrics.left !== csActiveMetrics.left || 
+          newMetrics.right !== csActiveMetrics.right || 
+          newMetrics.global !== csActiveMetrics.global || 
+          isCompareMode !== newCompareMode) {
+          changed = true;
+      }
+
+      if (changed || forceShout) {
+        csActiveMetrics = newMetrics;
+        isCompareMode = newCompareMode;
+        csMetricTypeName = newMetrics.global;
+
         applyAllOverrides();
 
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
-          payload: { type: 'syncMetricName', name: found }
+          payload: { type: 'syncMetricName', metrics: newMetrics, isCompare: newCompareMode }
         }, () => { void chrome.runtime.lastError; }); 
       }
-    } catch (e) {
-      // Silent fail during heavy DOM transitions
-    }
+    } catch (e) { }
 
     return (csMetricTypeName || "").toLowerCase();
   }
@@ -2894,24 +2947,22 @@
     const zoneKey = getZoneKey(el);
     if (!zoneKey) return null;
 
-    const activeMetricName = csMetricTypeName || "";
+    // CRITICAL FIX: Ask the helper which metric side this zone belongs to!
+    const activeMetricName = getActiveMetricForZone(zoneKey);
 
     if (activeMetricName) {
-      // 1. EXACT MATCH: Try the strict name first
+      // 1. EXACT MATCH
       const exactKey = `${zoneKey}@${activeMetricName}`;
       if (overrides[exactKey]) {
         return { key: exactKey, override: overrides[exactKey] };
       }
 
-      // 2. FUZZY MATCH: Handle UI shorthand vs Database formal names
+      // 2. FUZZY MATCH
       const prefix = `${zoneKey}@`;
       const fuzzyKey = Object.keys(overrides).find(k => {
         if (!k.startsWith(prefix)) return false;
-        
-        const storedMetric = k.substring(prefix.length).toLowerCase();
+        const storedMetric = k.substring(prefix.length).toLowerCase(); 
         const uiMetric = activeMetricName.toLowerCase();
-        
-        // If either string contains the other, we consider it a match!
         return storedMetric.includes(uiMetric) || uiMetric.includes(storedMetric);
       });
 
@@ -2920,7 +2971,7 @@
       }
     }
 
-    // 3. FALLBACK: Catch manual edits that don't have a metric attached
+    // 3. FALLBACK: Catch manual edits
     if (overrides[zoneKey]) {
       return { key: zoneKey, override: overrides[zoneKey] };
     }
@@ -3313,8 +3364,9 @@
     const currentValue = editorState.currentValue || String(parseFloat(currentMetric) || 0);
     const hasOverride = !!editorState.hasOverride;
     
-    // FETCH METRIC USING THE SIDE YOU CLICKED ON
-    const csTypeNameForState = readCsMetricTypeName(paneSide) || editorState.csMetricTypeName || '';
+    // FETCH METRIC USING THE NEW AMBIDEXTROUS HELPER
+    const activeMetricForPane = getActiveMetricForZone(zoneKey);
+    const csTypeNameForState = activeMetricForPane || editorState.csMetricTypeName || '';
     const csTypeName = isMetricTypeCompatible(currentMetric, csTypeNameForState) ? csTypeNameForState : '';
     
     let existingZoneName = editorState.zoneName || '';
@@ -4879,6 +4931,10 @@
 
     eligibleZones.forEach((row, index) => {
       if (!row.zoneKey) return;
+
+      // CRITICAL FIX: Get the metric for this specific pane side!
+      const targetMetricName = getActiveMetricForZone(row.zoneKey) || currentMetricName;
+
       let numericValue = maxVal;
       if (totalEligible > 1) {
         const ratio = index / (totalEligible - 1);
@@ -4886,14 +4942,14 @@
       }
       
       const displayMetric = formatMetricValue(numericValue);
-      const metricKey = `${row.zoneKey}@${currentMetricName}`;
+      const metricKey = `${row.zoneKey}@${targetMetricName}`;
       
       overrides[metricKey] = { 
           metric: displayMetric, 
           value: numericValue, 
           origMetric: '—', 
-          zoneName: `${currentMetricName} Bulk`, 
-          csMetricTypeName: currentMetricName 
+          zoneName: `${targetMetricName} Bulk`, 
+          csMetricTypeName: targetMetricName 
       };
 
       applyOverride(row.el, overrides[metricKey]);
@@ -4925,13 +4981,14 @@
     }
 
     if (isTopFrame && shout) {
-      const activeMetric = readCsMetricTypeName(); // Read the name!
+      readCsMetricTypeName(true); // Force update state
       chrome.runtime.sendMessage({
         type: 'broadcastToTab',
         payload: { 
           type: 'refresh_from_storage', 
           updatedRegistry: JSON.parse(JSON.stringify(metricRegistry)),
-          activeMetricName: activeMetric // Send the name so subframes know what to paint!
+          metrics: csActiveMetrics,
+          isCompare: isCompareMode
         }
       });
     }
@@ -6140,19 +6197,27 @@
     }
 
     if (msg.type === 'syncMetricName') {
-      csMetricTypeName = msg.name;
-      //console.log(`[CS Debug] Radio Tower Success: Subframe received "${csMetricTypeName}". Repainting...`);
-      
-      // NEW: Now that the subframe knows the new name, force it to repaint the zones!
-      applyAllOverrides(); 
-      
+      if (msg.metrics) {
+         csActiveMetrics = msg.metrics;
+         isCompareMode = msg.isCompare;
+         csMetricTypeName = msg.metrics.global;
+      } else {
+         csMetricTypeName = msg.name;
+      }
+      applyAllOverrides();
+      sendResponse({ok: true});
       return true;
     }
 
     if (msg.type === 'refresh_from_storage') {
-      if (msg.activeMetricName) {
-        csMetricTypeName = msg.activeMetricName; // SYNC THE BRAIN: Now the subframe knows what to show
+      if (msg.metrics) {
+         csActiveMetrics = msg.metrics;
+         isCompareMode = msg.isCompare;
+         csMetricTypeName = msg.metrics.global;
+      } else if (msg.activeMetricName) {
+         csMetricTypeName = msg.activeMetricName;
       }
+      
       if (msg.updatedRegistry) {
         metricRegistry = msg.updatedRegistry;
         generateAllClientMetrics(false);
@@ -6416,6 +6481,14 @@
   }
 
   window.addEventListener('message', event => {
+    // NEW: Catch the Top Frame's whisper about our identity!
+    if (event.data && event.data.__csDemoPaneSide) {
+       window.__csDemoPaneSide = event.data.__csDemoPaneSide;
+       // We know who we are now! Force an immediate repaint!
+       if (typeof applyAllOverrides === 'function') applyAllOverrides();
+       return;
+    }
+    
     if (event.source !== window) return;
     const data = event?.data;
     if (!data || data.__csDemoDebugRequest !== true) return;
@@ -6430,7 +6503,7 @@
     } catch (_) {
       // Ignore bridge dispatch failures.
     }
-  });
+  }, true); // Add capture: true to ensure CSQ doesn't block this!
 
   // Respond to page-world debug helper requests.
   window.addEventListener('cs-demo-debug-request', event => {
