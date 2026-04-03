@@ -2961,7 +2961,6 @@
       }
 
       // 2. FUZZY MATCH
-      // 2. PRECISION MATCH
       const prefix = `${zoneKey}@`;
       const fuzzyKey = Object.keys(overrides).find(k => {
         if (!k.startsWith(prefix)) return false;
@@ -4910,15 +4909,13 @@
         numVal = parseFloat(curMetric.replace(/[^0-9.,-]/g, '').replace(',', '.'));
       }
 
-      const isZero = curMetric.toUpperCase() === 'N/A' || curMetric.includes('—') || curMetric === '-' || curMetric === '' || isNaN(numVal) || Math.abs(numVal) < 0.1;
+      // We want to fill everything that doesn't have an override yet, even if it has native data (> 0)
+      const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+      const y = rect && Number.isFinite(rect.top) && Number.isFinite(rect.height)
+        ? (rect.top + rect.height / 2)
+        : Number.NaN;
+      eligibleZones.push({ el, y, zoneId: el.getAttribute('id') || '', zoneKey: getZoneKey(el) || '' });
 
-      if (isZero) {
-        const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
-        const y = rect && Number.isFinite(rect.top) && Number.isFinite(rect.height)
-          ? (rect.top + rect.height / 2)
-          : Number.NaN;
-        eligibleZones.push({ el, y, zoneId: el.getAttribute('id') || '', zoneKey: getZoneKey(el) || '' });
-      }
     });
 
     if (eligibleZones.length === 0) {
