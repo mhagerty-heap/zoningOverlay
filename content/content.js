@@ -2757,41 +2757,38 @@
   }
 
   // Attempts to read the current CS metric type name (e.g. "Click Rate", "Attractiveness Rate")
-  function readCsMetricTypeName() {
-    // Only the Top Frame performs the heavy lifting
+  function readCsMetricTypeName(forceShout = false) {
     if (!isTopFrame) return (csMetricTypeName || "").toLowerCase();
 
     try {
       let found = "";
-      
-      // Aggressively pierce ALL shadow DOMs to find the trigger text
       const triggers = getAllElementsBySelector('.metric-selector-trigger, [data-testid*="metric-selector"]');
-
+      
       for (const t of triggers) {
-        const text = t.textContent?.trim()?.toLowerCase() || "";
-        // Ignore empty text or generic placeholders
-        if (text && text !== 'select metric' && text.length > 2) {
-          // Look for keywords that confirm it's actually a metric name
-          if (text.includes('rate') || text.includes('revenue') || text.includes('time') || text.includes('click') || text.includes('exposure')) {
-            found = text;
-            break;
-          }
+        const span = t.querySelector('span') || t;
+        const text = span.textContent?.trim()?.toLowerCase() || "";
+        const rect = t.getBoundingClientRect();
+        
+        if (text && text !== 'select metric' && rect.width > 0 && rect.height > 0) {
+          found = text;
+          break; 
         }
       }
 
-      // If we found a valid name and it's DIFFERENT from what we had, update and broadcast
-      if (found && found !== csMetricTypeName) {
+      // CRITICAL FIX: Broadcast if the text changed OR if we are forcing a shout
+      if (found && (found !== csMetricTypeName || forceShout)) {
+        // Only log when it actually changes to avoid spamming the console
+        if (found !== csMetricTypeName) {
+            console.log(`[CS Debug] 🎯 Precision Scraper Resolved: "${found}"`);
+        }
+        
         csMetricTypeName = found;
-        console.log(`[CS Debug] 🎯 Smart-Scraper Resolved: "${found}"`);
-
-        // Repaint the top frame immediately
         applyAllOverrides();
 
-        // Tell the subframes to repaint
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
           payload: { type: 'syncMetricName', name: found }
-        });
+        }, () => { void chrome.runtime.lastError; }); // Suppress harmless closed port errors
       }
     } catch (e) {
       // Silent fail during heavy DOM transitions
@@ -6079,34 +6076,67 @@
     setTimeout(() => document.addEventListener('click', closeOnOutside, true), 0);
   }
 
+  // --- SPA NAVIGATION POLLER ---
+  let spaTransitionPoll = null;
+
+  function startAggressiveZonePolling() {
+    if (spaTransitionPoll) clearInterval(spaTransitionPoll);
+    let pollCount = 0;
+    let hasFoundZones = false;
+    
+    console.log(`[CS Debug] 🔄 SPA Poller Started in [${frameTag}]`);
+
+    spaTransitionPoll = setInterval(() => {
+      pollCount++;
+      
+      // CRITICAL FIX: Force the Top Frame to shout the metric name to the subframes!
+      if (isTopFrame) readCsMetricTypeName(true);
+      
+      const zones = getAllZoneElements();
+
+      if (zones.length > 0 && !hasFoundZones) {
+        console.log(`[CS Debug] ✅ Zones detected in [${frameTag}] on tick ${pollCount}. Applying overrides!`);
+        hasFoundZones = true;
+      } else if (zones.length === 0 && pollCount % 10 === 0) {
+        console.log(`[CS Debug] ⏱️ Tick ${pollCount}/40 in [${frameTag}] - Still 0 zones...`);
+      }
+
+      if (zones.length > 0) {
+        applyAllOverrides();
+        zones.forEach(watchZone);
+        updateToolbar();
+      }
+
+      if (pollCount > 40) {
+        console.log(`[CS Debug] 🛑 SPA Poller finished in [${frameTag}]`);
+        clearInterval(spaTransitionPoll); 
+      }
+    }, 500);
+  }
 
   // ─── SPA URL CHANGE DETECTION ────────────────────────────────────────────
-
-  function handleUrlChange() {
+function handleUrlChange() {
     if (location.href === lastUrl) return;
     lastUrl = location.href;
-    log('URL changed:', lastUrl);
+    console.log(`[CS Debug] 🔀 URL changed in [${frameTag}] -> ${lastUrl}`);
 
     if (isTopFrame && location.hostname === 'app.contentsquare.com') {
       const nextKey = normalizeCsUrlKey(location.href);
       setActivePageKey(nextKey, true);
-      log('Updated active page key:', nextKey);
-      // Refresh metric type name on every navigation — CS may switch metric in the URL
       refreshMetricTypeName();
     }
 
-    // Clean up zone watchers for old URL
     zoneObservers.forEach(entry => {
       entry.observer.disconnect();
       entry.element.removeEventListener('click', onZoneElementClick, true);
     });
     zoneObservers.clear();
 
-    // Load overrides for new URL
     Promise.all([loadOverrides(), loadHeatmapPointOverrides()]).then(() => {
       syncZoneWatchers();
       renderHeatmapPointOverlays();
       updateToolbar();
+      startAggressiveZonePolling();
     });
   }
 
@@ -7130,21 +7160,9 @@
     // 3. Start Document Observer
     startDocObserver();
 
-    // 4. NEW: AGGRESSIVE PERSISTENCE POLLING
-    // This solves the reload issue by checking for zones every 500ms for 20 seconds.
-    // Contentsquare is a heavy SPA; zones often arrive 2-5 seconds after the script first runs.
-    let pollCount = 0;
-    const initialApplyPoll = setInterval(() => {
-      const zones = getAllZoneElements();
-      if (zones.length > 0) {
-        applyAllOverrides(); 
-        zones.forEach(watchZone); // Ensures MutationObservers attach to new elements
-        updateToolbar();
-      }
-      pollCount++;
-      // Stop polling after 20 seconds to save CPU
-      if (pollCount > 40) clearInterval(initialApplyPoll); 
-    }, 500);
+    // 4. AGGRESSIVE PERSISTENCE POLLING
+    // Checks for zones every 500ms for 20 seconds during initial load or refresh
+    startAggressiveZonePolling();
 
     // 5. Initialize UI and Handlers
     syncZoneWatchers();
