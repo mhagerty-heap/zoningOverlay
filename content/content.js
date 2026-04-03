@@ -8,6 +8,9 @@
   'use strict';
 
   let metricRegistry = {
+    "blank rate": { min: 2, max: 25, type: "percent" },
+    "drop rate": { min: 5, max: 45, type: "percent" },
+    "refill rate": { min: 3, max: 30, type: "percent" },
     "attractiveness rate": { min: 5, max: 65, type: "percent" },
     "click rate (pageview level)": { min: 0.5, max: 12, type: "percent" },
     "click rate (session level)": { min: 0.8, max: 15, type: "percent" },
@@ -2776,7 +2779,7 @@
     if (!isTopFrame) return (csMetricTypeName || "").toLowerCase();
 
     try {
-      const triggers = getAllElementsBySelector('.metric-selector-trigger, [data-testid*="metric-selector"]');
+      const triggers = getAllElementsBySelector('.metric-selector-trigger, [data-testid*="metric-selector"], [data-testid="analysis-mode-selector"], .form-analysis-label');
       const visibleTriggers = [];
       
       for (const t of triggers) {
@@ -2958,11 +2961,24 @@
       }
 
       // 2. FUZZY MATCH
+      // 2. PRECISION MATCH
       const prefix = `${zoneKey}@`;
       const fuzzyKey = Object.keys(overrides).find(k => {
         if (!k.startsWith(prefix)) return false;
-        const storedMetric = k.substring(prefix.length).toLowerCase(); 
-        const uiMetric = activeMetricName.toLowerCase();
+        const storedMetric = k.substring(prefix.length).toLowerCase().trim(); 
+        const uiMetric = activeMetricName.toLowerCase().trim();
+        
+        // A. Exact match is always a win
+        if (storedMetric === uiMetric) return true;
+        
+        // B. Form Analysis protection: 
+        // If the UI is showing a Form metric, do NOT allow partial "Rate" matches.
+        const formMetrics = ['blank rate', 'drop rate', 'refill rate'];
+        if (formMetrics.some(m => uiMetric.includes(m))) {
+           return storedMetric === uiMetric; // Force exact match for form fields
+        }
+
+        // C. Standard Fuzzy Match (Preserves functionality for "Click Rate" vs "Click Rate (pageview level)")
         return storedMetric.includes(uiMetric) || uiMetric.includes(storedMetric);
       });
 
