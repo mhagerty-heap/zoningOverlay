@@ -2802,42 +2802,48 @@
   }
 
   // Attempts to read the current CS metric type name (e.g. "Click Rate", "Attractiveness Rate")
-  // from the top-frame page. Tries three strategies in order:
-  //  1. URL hash query param  (?metric=click_rate  or  ?indicator=click_rate)
-  //  2. Known CS DOM selectors for the active metric pill / dropdown button
-  //  3. Text-scan of the page for known CS metric names
-  // Returns an empty string when nothing can be found.
   function readCsMetricTypeName() {
-  // Only the Top Frame should perform the heavy lifting of the Double-Drill
-  if (!isTopFrame) return (csMetricTypeName || "").toLowerCase();
+    // Only the Top Frame performs the heavy lifting
+    if (!isTopFrame) return (csMetricTypeName || "").toLowerCase();
 
-  try {
-    // Layer 1: Pierce the main App container
-    const root1 = document.querySelector('app-zonings')?.shadowRoot;
-    
-    // Layer 2: Pierce the Metric Selector component inside Layer 1
-    const root2 = root1?.querySelector('metrics-metric-selector')?.shadowRoot;
-    
-    // Layer 3: Grab the specific span text
-    const span = root2?.querySelector('.metric-selector-trigger span');
-    const found = span?.textContent?.trim()?.toLowerCase() || "";
-    
-    if (found && found !== csMetricTypeName) {
-      csMetricTypeName = found;
-      console.log(`[CS Debug] ✅ Double-Drill Resolved: "${found}"`);
+    try {
+      let found = "";
       
-      // BROADCAST: Tell the subframes (the ones painting the zones) the new name
-      chrome.runtime.sendMessage({
-        type: 'broadcastToTab',
-        payload: { type: 'syncMetricName', name: found }
-      });
-    }
-  } catch (e) {
-    // Silent fail if the UI hasn't rendered yet
-  }
+      // Aggressively pierce ALL shadow DOMs to find the trigger text
+      const triggers = getAllElementsBySelector('.metric-selector-trigger, [data-testid*="metric-selector"]');
 
-  return (csMetricTypeName || "").toLowerCase();
-}
+      for (const t of triggers) {
+        const text = t.textContent?.trim()?.toLowerCase() || "";
+        // Ignore empty text or generic placeholders
+        if (text && text !== 'select metric' && text.length > 2) {
+          // Look for keywords that confirm it's actually a metric name
+          if (text.includes('rate') || text.includes('revenue') || text.includes('time') || text.includes('click') || text.includes('exposure')) {
+            found = text;
+            break;
+          }
+        }
+      }
+
+      // If we found a valid name and it's DIFFERENT from what we had, update and broadcast
+      if (found && found !== csMetricTypeName) {
+        csMetricTypeName = found;
+        console.log(`[CS Debug] 🎯 Smart-Scraper Resolved: "${found}"`);
+
+        // Repaint the top frame immediately
+        applyAllOverrides();
+
+        // Tell the subframes to repaint
+        chrome.runtime.sendMessage({
+          type: 'broadcastToTab',
+          payload: { type: 'syncMetricName', name: found }
+        });
+      }
+    } catch (e) {
+      // Silent fail during heavy DOM transitions
+    }
+
+    return (csMetricTypeName || "").toLowerCase();
+  }
 
   function refreshMetricTypeName() {
     const found = readCsMetricTypeName();
@@ -2938,25 +2944,37 @@
   }
 
   // Finds the stored override that matches el's current metric context.
-  // A match exists when the zone's current metric equals either ov.metric (override applied)
-  // or ov.origMetric (override cleared / not yet applied). This means overrides from a
-  // different metric mode (e.g. Revenue overrides on a Click Rate view) are invisible here,
-  // which naturally prevents cross-metric bleed in the MutationObserver as well.
   function getOverrideForElement(el) {
     const zoneKey = getZoneKey(el);
     if (!zoneKey) return null;
 
-    // Use the most recent metric name we've synced from the top frame
     const activeMetricName = csMetricTypeName || "";
 
     if (activeMetricName) {
-      const metricAwareKey = `${zoneKey}@${activeMetricName}`;
-      if (overrides[metricAwareKey]) {
-        return { key: metricAwareKey, override: overrides[metricAwareKey] };
+      // 1. EXACT MATCH: Try the strict name first
+      const exactKey = `${zoneKey}@${activeMetricName}`;
+      if (overrides[exactKey]) {
+        return { key: exactKey, override: overrides[exactKey] };
+      }
+
+      // 2. FUZZY MATCH: Handle UI shorthand vs Database formal names
+      const prefix = `${zoneKey}@`;
+      const fuzzyKey = Object.keys(overrides).find(k => {
+        if (!k.startsWith(prefix)) return false;
+        
+        const storedMetric = k.substring(prefix.length).toLowerCase();
+        const uiMetric = activeMetricName.toLowerCase();
+        
+        // If either string contains the other, we consider it a match!
+        return storedMetric.includes(uiMetric) || uiMetric.includes(storedMetric);
+      });
+
+      if (fuzzyKey) {
+        return { key: fuzzyKey, override: overrides[fuzzyKey] };
       }
     }
 
-    // Fallback for manual/generic edits
+    // 3. FALLBACK: Catch manual edits that don't have a metric attached
     if (overrides[zoneKey]) {
       return { key: zoneKey, override: overrides[zoneKey] };
     }
@@ -3190,6 +3208,9 @@
   }
 
   function syncZoneWatchers() {
+    // Force the top frame to continuously check if the user switched metrics in the UI
+    if (isTopFrame) readCsMetricTypeName();
+
     const zones = getAllZoneElements();
     const activeKeys = new Set();
 
@@ -5206,17 +5227,30 @@
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
 
+    // CHECK STATE: Are we currently editing?
+    const isEditing = !!editMode;
+    const disabledOverlayStyle = isEditing ? '' : 'opacity: 0.5; pointer-events: none; filter: grayscale(50%);';
+    
+    // WARNING BANNER: Show if Edit Mode is off
+    const editModeWarning = isEditing ? '' : `
+      <div style="background: #fff0f0; color: #cc3333; padding: 10px 16px; font-size: 11px; font-weight: 600; border-bottom: 1px solid #ffcccc; display: flex; align-items: center; gap: 8px;">
+        <span>⚠️</span> Edit Zones must be turned ON to use these features.
+      </div>
+    `;
+
     panel.innerHTML = `
       <div class="panel-header">⚙️ Advanced Tools</div>
-      <div class="tab-content active" style="display: block;">
+      ${editModeWarning}
+      
+      <div class="tab-content active" style="display: block; ${disabledOverlayStyle}">
         
         <div class="section-label" style="color: #2c2c8c;">1. Bulk Fill Current Metric</div>
         <div class="hint" style="margin-top:-4px; margin-bottom:10px;">Auto-populates zero-value/empty zones for the metric currently on screen.</div>
         <div class="row">
-          <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max Value (e.g. 15)">
-          <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min Value (e.g. 1)">
+          <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max Value (e.g. 15)" ${isEditing ? '' : 'disabled'}>
+          <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min Value (e.g. 1)" ${isEditing ? '' : 'disabled'}>
         </div>
-        <button class="btn btn-apply" id="btn-bulk-fill" style="margin-bottom: 4px;">Fill Zeros for Current Metric</button>
+        <button class="btn btn-apply" id="btn-bulk-fill" style="margin-bottom: 4px;" ${isEditing ? '' : 'disabled'}>Fill Zeros for Current Metric</button>
         
         <hr class="divider">
 
@@ -5232,24 +5266,24 @@
           ${Object.entries(metricRegistry).map(([name, config]) => `
             <div class="tuner-row">
               <div class="tuner-label" title="${name}">${name}</div>
-              <input class="tuner-inp metric-min" data-metric="${name}" type="number" value="${config.min}">
-              <input class="tuner-inp metric-max" data-metric="${name}" type="number" value="${config.max}">
+              <input class="tuner-inp metric-min" data-metric="${name}" type="number" value="${config.min}" ${isEditing ? '' : 'disabled'}>
+              <input class="tuner-inp metric-max" data-metric="${name}" type="number" value="${config.max}" ${isEditing ? '' : 'disabled'}>
             </div>
           `).join('')}
         </div>
 
-        <button class="btn btn-apply" id="btn-nuclear-fill" style="background: #cc3333; margin-bottom: 4px;">🚀 Generate All Data</button>
+        <button class="btn btn-apply" id="btn-nuclear-fill" style="background: #cc3333; margin-bottom: 4px;" ${isEditing ? '' : 'disabled'}>🚀 Generate All Data</button>
 
         <hr class="divider">
 
         <div class="section-label">3. Exposure Auto-Seed Bounds</div>
         <div class="row">
-          <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top %">
-          <input id="inp-exp-bottom" class="inp" type="number" step="0.1" value="20" placeholder="Bottom %">
+          <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top %" ${isEditing ? '' : 'disabled'}>
+          <input id="inp-exp-bottom" class="inp" type="number" step="0.1" value="20" placeholder="Bottom %" ${isEditing ? '' : 'disabled'}>
         </div>
         <div class="chk-row">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="chk-exp-fixed-fold">
+            <input type="checkbox" id="chk-exp-fixed-fold" ${isEditing ? '' : 'disabled'}>
             Use fixed fold position
           </label>
         </div>
@@ -5259,13 +5293,13 @@
         </div>
         <div class="chk-row">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="chk-exp-skip-edited" checked>
+            <input type="checkbox" id="chk-exp-skip-edited" checked ${isEditing ? '' : 'disabled'}>
             Skip already edited zones
           </label>
         </div>
         <div class="chk-row">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="chk-exp-per-pane">
+            <input type="checkbox" id="chk-exp-per-pane" ${isEditing ? '' : 'disabled'}>
             Use per-pane bounds
           </label>
         </div>
@@ -5275,14 +5309,14 @@
             : paneKeys.map((paneKey, idx) => `
               <div class="pane-row">
                 <div class="pane-name" title="${escHtml(paneKey)}">Pane ${idx + 1}</div>
-                <input class="inp exp-pane-top" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="100" style="padding:4px 6px;font-size:11px;">
-                <input class="inp exp-pane-bottom" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="20" style="padding:4px 6px;font-size:11px;">
+                <input class="inp exp-pane-top" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="100" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
+                <input class="inp exp-pane-bottom" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="20" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
               </div>
             `).join('')
           }
         </div>
         <div class="hint">Uses current viewport as fold by default: zones above fold get Top %, then values decrease toward Bottom % below fold.</div>
-        <button class="btn btn-apply" id="btn-auto-exposure" style="background: #4a4a64;">Apply Exposure Gradient</button>
+        <button class="btn btn-apply" id="btn-auto-exposure" style="background: #4a4a64;" ${isEditing ? '' : 'disabled'}>Apply Exposure Gradient</button>
       </div>
     `;
 
@@ -6144,8 +6178,11 @@
 
     if (msg.type === 'syncMetricName') {
       csMetricTypeName = msg.name;
-      // This is the "Eureka" moment log for the subframe
-      console.log(`[CS Debug] Radio Tower Success: Subframe received "${csMetricTypeName}"`);
+      console.log(`[CS Debug] Radio Tower Success: Subframe received "${csMetricTypeName}". Repainting...`);
+      
+      // NEW: Now that the subframe knows the new name, force it to repaint the zones!
+      applyAllOverrides(); 
+      
       return true;
     }
 
