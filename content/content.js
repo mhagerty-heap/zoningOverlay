@@ -3116,18 +3116,20 @@
     const rawOrigColor = existingOv?.origColor ?? el.getAttribute('color');
     const origColor = (rawOrigColor === null || rawOrigColor === undefined) ? '' : String(rawOrigColor);
 
-    if (existing && existing.key !== getMetricBasedKey(resolvedZoneKey, origMetric)) {
+    // CRITICAL FIX: Save using the Metric Name (e.g., "click rate"), NOT the literal string ("12.5%")!
+    const resolvedTypeName = getActiveMetricForZone(resolvedZoneKey) || csTypeName || csMetricTypeName || '';
+    const metricKeyName = resolvedTypeName || origMetric;
+    const newKey = `${resolvedZoneKey}@${metricKeyName}`;
+
+    if (existing && existing.key !== newKey) {
       delete overrides[existing.key];
     }
     if (overrides[resolvedZoneKey]) delete overrides[resolvedZoneKey]; 
     if (zoneId && zoneId !== resolvedZoneKey && overrides[zoneId]) delete overrides[zoneId];
 
-    const resolvedTypeName = csTypeName || csMetricTypeName || '';
-    
     // SAFE: Pass the resolvedZoneKey into the generator so it can extract the side text
     const finalName = zoneName || existingOv?.zoneName || generateDefaultZoneName(origMetric, resolvedTypeName, resolvedZoneKey);
     
-    const newKey = getMetricBasedKey(resolvedZoneKey, origMetric);
     overrides[newKey] = { metric, value, origMetric, origValue, origColor, zoneName: finalName, csMetricTypeName: resolvedTypeName };
 
     applyOverride(el, { metric, value });
