@@ -246,6 +246,7 @@
   let heatmapPrimaryScrollContainer = null;
   let heatmapNeedsPersist = false;
   let lastKnownHeatmapLayer = 'clicks';
+  let isBulkGenerating = false;
 
   // ─── STORAGE ─────────────────────────────────────────────────────────────
 
@@ -2401,6 +2402,9 @@
     
     // Always determine side by comparing the pane's bounding rect to the viewport center
     const getHorizontalSide = rect => {
+      // PRO FIX: If the Top Frame told us who we are, believe it!
+      if (window.__csDemoPaneSide) return window.__csDemoPaneSide;
+      
       if (!rect) return 'left';
       // Use only the current window's innerWidth to avoid cross-origin errors
       const viewportCenter = window.innerWidth / 2;
@@ -4852,6 +4856,7 @@
   };
 
   async function applyBulkFillToCurrentMetric(maxVal, minVal) {
+    isBulkGenerating = true;
     if (isTopFrame) {
       // 1. Force a fresh read immediately when the button is clicked
       const syncName = readCsMetricTypeName(); 
@@ -4919,6 +4924,7 @@
     });
 
     if (eligibleZones.length === 0) {
+      isBulkGenerating = false;
       return { applied: 0, totalZones: zoneElements.length };
     }
 
@@ -4935,51 +4941,68 @@
       return Math.round(val).toLocaleString('en-US');
     };
 
-    eligibleZones.sort((a, b) => {
-      const aY = Number.isFinite(a.y) ? a.y : 0;
-      const bY = Number.isFinite(b.y) ? b.y : 0;
-      return aY - bY;
+    // Group eligible zones by pane so Left and Right don't mix their distributions
+    const paneGroups = {};
+    eligibleZones.forEach(row => {
+      const pKey = getPaneKey(row.el) || 'default';
+      if (!paneGroups[pKey]) paneGroups[pKey] = [];
+      paneGroups[pKey].push(row);
     });
 
     let applied = 0;
-    const totalEligible = eligibleZones.length;
+    Object.keys(paneGroups).forEach((pKey) => {
+      const group = paneGroups[pKey].sort((a, b) => (Number.isFinite(a.y) ? a.y : 0) - (Number.isFinite(b.y) ? b.y : 0));
+      const totalEligible = group.length;
 
-    eligibleZones.forEach((row, index) => {
-      if (!row.zoneKey) return;
+      // Pane-Aware Variance: Identify right pane by key
+      const isRightPane = pKey.includes('right');
+      const variance = isRightPane ? 0.88 : 1; // 12% drop for the right side
+      const pMax = maxVal * variance;
+      const pMin = minVal * variance;
 
-      // CRITICAL FIX: Get the metric for this specific pane side!
-      const targetMetricName = getActiveMetricForZone(row.zoneKey) || currentMetricName;
+      group.forEach((row, index) => {
+        if (!row.zoneKey) return;
+        const targetMetricName = getActiveMetricForZone(row.zoneKey) || currentMetricName;
 
-      let numericValue = maxVal;
-      if (totalEligible > 1) {
-        const ratio = index / (totalEligible - 1);
-        numericValue = maxVal - (ratio * (maxVal - minVal));
-      }
-      
-      const displayMetric = formatMetricValue(numericValue);
-      const metricKey = `${row.zoneKey}@${targetMetricName}`;
-      
-      overrides[metricKey] = { 
-          metric: displayMetric, 
-          value: numericValue, 
-          origMetric: '—', 
-          zoneName: `${targetMetricName} Bulk`, 
-          csMetricTypeName: targetMetricName 
-      };
+        let numericValue = pMax;
+        if (totalEligible > 1) {
+          const ratio = index / (totalEligible - 1);
+          numericValue = pMax - (ratio * (pMax - pMin));
+        }
+        
+        const displayMetric = formatMetricValue(numericValue);
+        const metricKey = `${row.zoneKey}@${targetMetricName}`;
+        
+        overrides[metricKey] = { 
+            metric: displayMetric, 
+            value: numericValue, 
+            origMetric: '—', 
+            zoneName: `${targetMetricName} Bulk`, 
+            csMetricTypeName: targetMetricName 
+        };
 
-      applyOverride(row.el, overrides[metricKey]);
-      applied++;
+        applyOverride(row.el, overrides[metricKey]);
+        applied++;
+      });
     });
 
     if (applied > 0) {
+      // Anti-Collision Stagger: Right pane waits 400ms before saving
+      const isRightPane = Object.keys(paneGroups).some(k => k.includes('right'));
+      if (isRightPane && !isTopFrame) {
+        await new Promise(resolve => setTimeout(resolve, 400));
+      }
+
       await persistOverridesMerged();
       syncZoneWatchers();
       updateToolbar();
     }
+    isBulkGenerating = false;
     return { applied, totalZones: zoneElements.length };
   }
 
   async function generateAllClientMetrics(shout = true) {
+    isBulkGenerating = true;
     const shadow = document.querySelector('#cs-demo-exposure-host')?.shadowRoot;
     if (shadow) {
       shadow.querySelectorAll('.tuner-inp').forEach(inp => {
@@ -5013,50 +5036,75 @@
     }));
 
     let zones = getCandidateZoneElements();
-    if (zones.length === 0) return { ok: true, metricsCount: metricsLibrary.length, zonesCount: 0 };
+    if (zones.length === 0) {
+      isBulkGenerating = false;
+      return { ok: true, metricsCount: metricsLibrary.length, zonesCount: 0 };
+    }
 
-    const sortedZones = zones.map(el => {
+    // Group zones by pane so Left and Right get independent 360° Data distributions
+    // Group zones by pane so Left and Right get independent 360° Data distributions
+    const panes = {};
+    zones.forEach(el => {
+      const pKey = getPaneKey(el) || 'default';
+      if (!panes[pKey]) panes[pKey] = [];
       const rect = el.getBoundingClientRect();
-      return { el, y: rect.top + rect.height / 2, key: getZoneKey(el) || el.getAttribute('id') };
-    }).sort((a, b) => a.y - b.y);
+      panes[pKey].push({ el, y: rect.top + rect.height / 2, key: getZoneKey(el) || el.getAttribute('id') });
+    });
 
     metricsLibrary.forEach(m => {
-      sortedZones.forEach((row, index) => {
-        let val = m.max;
-        if (sortedZones.length > 1) {
-          const ratio = index / (sortedZones.length - 1);
-          val = m.max - (ratio * (m.max - m.min));
-        }
+      Object.keys(panes).forEach((pKey) => {
+        const paneZones = panes[pKey].sort((a, b) => a.y - b.y); 
 
-        let display;
-        if (m.type === "currency") {
-          display = `$${val.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-        } else if (m.type === "percent" || m.type === "percent_long") {
-          display = `${val.toFixed(m.type === "percent" ? 1 : 2)}%`;
-        } else if (m.type === "time") {
-          display = `${val.toFixed(1)}s`;
-        } else if (m.type === "decimal") {
-          display = val.toFixed(2);
-        } else {
-          display = Math.round(val).toLocaleString();
-        }
+        // Pane-Aware Variance: Identify right pane by key
+        const isRightPane = pKey.includes('right');
+        const variance = isRightPane ? 0.88 : 1; // 12% drop for the right side
+        const pMax = m.max * variance;
+        const pMin = m.min * variance;
 
-        const overrideKey = `${row.key}@${m.name}`;
-        overrides[overrideKey] = { 
-            metric: display, 
-            value: val, 
-            origMetric: '—', 
-            zoneName: `${m.name} Data`, 
-            csMetricTypeName: m.name 
-        };
+        paneZones.forEach((row, index) => {
+          let val = pMax;
+          if (paneZones.length > 1) {
+            const ratio = index / (paneZones.length - 1);
+            val = pMax - (ratio * (pMax - pMin));
+          }
+
+          let display;
+          if (m.type === "currency") {
+            display = `$${val.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+          } else if (m.type === "percent" || m.type === "percent_long") {
+            display = `${val.toFixed(m.type === "percent" ? 1 : 2)}%`;
+          } else if (m.type === "time") {
+            display = `${val.toFixed(1)}s`;
+          } else if (m.type === "decimal") {
+            display = val.toFixed(2);
+          } else {
+            display = Math.round(val).toLocaleString();
+          }
+
+          const overrideKey = `${row.key}@${m.name}`;
+          overrides[overrideKey] = { 
+              metric: display, 
+              value: val, 
+              origMetric: '—', 
+              zoneName: `${m.name} Data`, 
+              csMetricTypeName: m.name 
+          };
+        });
       });
     });
+
+    // Anti-Collision Stagger: Right pane waits 400ms before merging storage
+    const hasRightPane = Object.keys(panes).some(k => k.includes('right'));
+    if (hasRightPane && !isTopFrame) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+    }
 
     await persistOverridesMerged(); // Safe merge
     applyAllOverrides();
     syncZoneWatchers();
 
-    return { ok: true, metricsCount: metricsLibrary.length, zonesCount: sortedZones.length };
+    isBulkGenerating = false;
+    return { ok: true, metricsCount: metricsLibrary.length, zonesCount: zones.length };
   }
 
   function openExposurePanel() {
@@ -6235,6 +6283,7 @@
       
       if (msg.updatedRegistry) {
         metricRegistry = msg.updatedRegistry;
+        // Subframes DO generate data!
         generateAllClientMetrics(false);
       } else {
         loadOverrides().then(() => {
@@ -6358,6 +6407,7 @@
     }
 
     if (msg.type === 'applyBulkFillInFrame') {
+      // Allow all frames to participate, but we will stagger their saves
       applyBulkFillToCurrentMetric(msg.maxVal, msg.minVal).then(result => {
         sendResponse({ ok: true, frame: frameContextKey, ...result });
       });
@@ -7011,6 +7061,9 @@
       }
     }
     if (changes.csZoningOverrides) {
+      // BUG FIX: Shield local memory from being wiped while the right pane is sleeping!
+      if (isBulkGenerating) return;
+      
       const all = changes.csZoningOverrides.newValue || {};
       const nextOverrides = all[getUrlKey()] || {};
       overrides = { ...nextOverrides };
