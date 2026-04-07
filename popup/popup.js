@@ -184,6 +184,13 @@ function setupListeners() {
     extensionEnabled = !!response?.enabled;
     updateExtensionToggleUi();
 
+    // PRO FIX: Instantly tell the content script to hide/show the menu and data!
+    if (currentTabId) {
+      try {
+        await sendMessageWithInjection({ type: 'setMasterEnabled', enabled: extensionEnabled });
+      } catch (e) {}
+    }
+
     if (!extensionEnabled) {
       currentState = { ...currentState, editMode: false, uiVisible: false };
       updateUI(currentState);

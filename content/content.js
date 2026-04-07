@@ -221,6 +221,7 @@
 
   let editMode = false;
   let uiVisible = true;
+  let masterEnabled = true; // NEW: The Master Power Switch
   let activePageKey = '';
   let csMetricTypeName = ''; // Current CS metric type label read from URL / DOM (e.g. "Click Rate")
   let overrides = {};           // { zoneId: { metric, value, origMetric, origValue } }
@@ -351,6 +352,39 @@
     });
   }
 
+  function loadMasterEnabled() {
+    return new Promise(resolve => {
+      chrome.storage.local.get('csZoningMasterEnabled', result => {
+        masterEnabled = result.csZoningMasterEnabled !== false; // Default ON
+        log('Loaded master enabled:', masterEnabled);
+        resolve();
+      });
+    });
+  }
+
+  function setMasterEnabled(enabled, syncGlobal = true) {
+    const next = !!enabled;
+    if (masterEnabled === next) return;
+    masterEnabled = next;
+    log('Master enabled changed:', masterEnabled);
+    
+    // INSTANTLY trigger rules based on the new Master State
+    applyUiVisibility();
+    applyAllOverrides(); 
+    renderHeatmapPointOverlays();
+    syncPageWorldState();
+
+    if (syncGlobal) {
+      chrome.storage.local.set({ csZoningMasterEnabled: masterEnabled });
+      if (isTopFrame) {
+        chrome.runtime.sendMessage({
+          type: 'broadcastToTab',
+          payload: { type: 'setMasterEnabledFrame', enabled: masterEnabled }
+        }, () => { void chrome.runtime.lastError; });
+      }
+    }
+  }
+
   function loadUiVisibility() {
     return new Promise(resolve => {
       chrome.storage.local.get('csZoningUiVisible', result => {
@@ -442,13 +476,24 @@
 
   function applyUiVisibility() {
     if (!isTopFrame) return;
+
+    // ZONING PAGE ONLY RULE: Check if we are actively on a zoning/heatmap view
+    const isZoningView = getActiveAnalysisMode() === 'zoning' || getActiveAnalysisMode() === 'heatmap' || isLikelyZoningRoute() || getAllZoneElements().length > 0;
+    
+    // THE 3 RULES: Master ON + UI not hidden + Zoning Page
+    const shouldShowToolbar = masterEnabled && uiVisible && isZoningView;
+    
     if (toolbarHost) {
-      toolbarHost.style.display = uiVisible ? 'block' : 'none';
+      toolbarHost.style.display = shouldShowToolbar ? 'block' : 'none';
     }
-    if (!uiVisible) {
+    
+    // If hidden, force-close all open panels so they don't linger on screen
+    if (!shouldShowToolbar) {
       closePopover();
       closeScenariosPanel();
       closeExposurePanel();
+      const editsHost = document.getElementById('cs-demo-edits-host');
+      if (editsHost) editsHost.remove();
     }
   }
 
@@ -1943,7 +1988,8 @@
     const analysisMode = getActiveAnalysisMode();
     const heatmapEditingCtx = isHeatmapEditingContext();
     const heatmapView = isLikelyHeatmapView();
-    const showHeatmapOverlays = uiVisible && (analysisMode === 'heatmap' || heatmapEditingCtx || heatmapView);
+    // Master must be ON to show fake points. (uiVisible only hides the purple menu, not the data!)
+    const showHeatmapOverlays = masterEnabled && (analysisMode === 'heatmap' || heatmapEditingCtx || heatmapView);
 
     if (!showHeatmapOverlays) {
       clearHeatmapPointOverlaysNow();
@@ -3249,28 +3295,37 @@
 
     log('Zone watcher sync complete. zones=', zones.length, 'watchers=', zoneObservers.size);
     
-    // FIX: Force an immediate evaluation of overlays when the DOM mutates (e.g. switching tabs)
+    // FIX: Force an immediate evaluation of overlays when the DOM mutates
     renderHeatmapPointOverlays();
+    
+    // FIX: Re-evaluate purple menu visibility in case we navigated to/from a Zoning page
+    applyUiVisibility();
+  }
+
+  function removeOverrideVisually(el) {
+    if (el.hasAttribute('data-cs-demo-orig-metric')) {
+      el.setAttribute('metric', String(el.getAttribute('data-cs-demo-orig-metric') || ''));
+      if (el.hasAttribute('data-cs-demo-orig-value')) el.setAttribute('value', String(el.getAttribute('data-cs-demo-orig-value') || ''));
+      else el.removeAttribute('value');
+      if (el.hasAttribute('data-cs-demo-orig-color')) el.setAttribute('color', String(el.getAttribute('data-cs-demo-orig-color') || ''));
+      else el.removeAttribute('color');
+    }
+    el.style.outline = '';
+    el.style.outlineOffset = '';
   }
 
   function applyAllOverrides() {
     const zoneElements = getAllZoneElements();
-    if (window.__ZONING_DEBUG_LOG__ !== false) {
-      // console.log('[ZONING-DEBUG][applyAllOverrides] zoneElements.length:', zoneElements.length);
-    }
     zoneElements.forEach(el => {
-      const key = getZoneKey(el);
-      const existing = getOverrideForElement(el);
-      if (window.__ZONING_DEBUG_LOG__ !== false) {
-        // console.log('[ZONING-DEBUG][applyAllOverrides]', {
-        //   el,
-        //   key,
-        //   hasOverride: !!existing,
-        //   override: existing?.override,
-        //   allOverrideKeys: Object.keys(overrides)
-        // });
+      // MASTER OFF RULE: If extension is OFF, show native data without deleting storage
+      if (!masterEnabled) {
+         removeOverrideVisually(el);
+         return;
       }
+      
+      const existing = getOverrideForElement(el);
       if (existing) applyOverride(el, existing.override);
+      else removeOverrideVisually(el);
     });
   }
 
@@ -6435,6 +6490,16 @@
       sendResponse({ ok: true });
       return true;
     }
+    if (msg.type === 'setMasterEnabled') {
+      setMasterEnabled(msg.enabled, true);
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (msg.type === 'setMasterEnabledFrame') {
+      setMasterEnabled(msg.enabled, false);
+      sendResponse({ ok: true });
+      return true;
+    }
     if (msg.type === 'setEditMode') {
       setEditMode(msg.enabled, true);
       sendResponse({ ok: true });
@@ -7095,6 +7160,13 @@
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== 'local') return;
+    if (changes.csZoningMasterEnabled) {
+      const next = changes.csZoningMasterEnabled.newValue !== false;
+      if (next !== masterEnabled) {
+        log('Storage master-enabled update received:', next);
+        setMasterEnabled(next, false);
+      }
+    }
     if (changes.csZoningEditMode) {
       const next = !!changes.csZoningEditMode.newValue;
       if (next !== editMode) {
@@ -7335,6 +7407,7 @@
       log('Detected CS metric type name:', csMetricTypeName || '(not detected yet)');
     }
 
+    await loadMasterEnabled();
     await loadGlobalEditMode();
     await loadUiVisibility();
     await loadOverrides();
