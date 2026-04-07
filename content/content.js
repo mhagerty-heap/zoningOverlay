@@ -4855,7 +4855,7 @@
     updateToolbar();
   };
 
-  async function applyBulkFillToCurrentMetric(maxVal, minVal) {
+  async function applyBulkFillToCurrentMetric(maxVal, minVal, jitter = 0.16, trueRandom = false) {
     isBulkGenerating = true;
     if (isTopFrame) {
       // 1. Force a fresh read immediately when the button is clicked
@@ -4965,9 +4965,15 @@
         const targetMetricName = getActiveMetricForZone(row.zoneKey) || currentMetricName;
 
         let numericValue = pMax;
-        if (totalEligible > 1) {
+        if (trueRandom) {
+          // Absolute Chaos: Pick a random number between Min and Max
+          numericValue = pMin + Math.random() * (pMax - pMin);
+        } else if (totalEligible > 1) {
           const ratio = index / (totalEligible - 1);
-          numericValue = pMax - (ratio * (pMax - pMin));
+          // Apply SC's selected random noise
+          const noise = (Math.random() - 0.5) * jitter;
+          const noisyRatio = Math.min(Math.max(ratio + noise, 0), 1);
+          numericValue = pMax - (noisyRatio * (pMax - pMin));
         }
         
         const displayMetric = formatMetricValue(numericValue);
@@ -5001,7 +5007,7 @@
     return { applied, totalZones: zoneElements.length };
   }
 
-  async function generateAllClientMetrics(shout = true) {
+  async function generateAllClientMetrics(shout = true, jitter = 0.16, trueRandom = false) {
     isBulkGenerating = true;
     const shadow = document.querySelector('#cs-demo-exposure-host')?.shadowRoot;
     if (shadow) {
@@ -5026,7 +5032,9 @@
           type: 'refresh_from_storage', 
           updatedRegistry: JSON.parse(JSON.stringify(metricRegistry)),
           metrics: csActiveMetrics,
-          isCompare: isCompareMode
+          isCompare: isCompareMode,
+          jitter: jitter,
+          trueRandom: trueRandom
         }
       });
     }
@@ -5063,9 +5071,15 @@
 
         paneZones.forEach((row, index) => {
           let val = pMax;
-          if (paneZones.length > 1) {
+          if (trueRandom) {
+            // Absolute Chaos
+            val = pMin + Math.random() * (pMax - pMin);
+          } else if (paneZones.length > 1) {
             const ratio = index / (paneZones.length - 1);
-            val = pMax - (ratio * (pMax - pMin));
+            // Apply SC's selected random noise
+            const noise = (Math.random() - 0.5) * jitter;
+            const noisyRatio = Math.min(Math.max(ratio + noise, 0), 1);
+            val = pMax - (noisyRatio * (pMax - pMin));
           }
 
           let display;
@@ -5308,6 +5322,27 @@
       
       <div class="tab-content active" style="display: block; ${disabledOverlayStyle}">
         
+        <div class="section-label" style="color: #4a4a64; display: flex; align-items: center; gap: 6px;">
+          0. Data Realism (Jitter) 
+          <span id="btn-jitter-help" style="cursor:pointer; background:#e0e0f0; color:#4a4a64; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:bold;">?</span>
+        </div>
+        <div id="jitter-help-box" style="display:none; font-size:10px; color:#555; background:#f0f0fa; border: 1px solid #d0d0e0; padding:8px; border-radius:6px; margin-bottom:10px; line-height:1.4;">
+          <strong>How it works:</strong><br>
+          <strong>Slider (Gradient Noise):</strong> Shifts the natural top-to-bottom data flow. At 40% Jitter, a zone's value shifts up or down by up to 20% of the total Max/Min spread. Crank it to 100% for wild swings!<br><br>
+          <strong>True Randomness:</strong> Destroys the top-to-bottom rule entirely. Every zone gets a completely random number between your Max and Min limits.
+        </div>
+        <div style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
+          <input type="range" id="inp-jitter" min="0" max="100" step="1" value="16" style="flex:1;" ${isEditing ? '' : 'disabled'}>
+          <span id="txt-jitter" style="font-weight:bold; width:40px; text-align:right; color:#2c2c8c;">16%</span>
+        </div>
+        <div class="chk-row" style="margin-bottom: 16px;">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+            <input type="checkbox" id="chk-true-random" ${isEditing ? '' : 'disabled'}>
+            True Randomness (Ignore gradient)
+          </label>
+        </div>
+        <hr class="divider">
+
         <div class="section-label" style="color: #2c2c8c;">1. Bulk Fill Current Metric</div>
         <div class="hint" style="margin-top:-4px; margin-bottom:10px;">Auto-populates zero-value/empty zones for the metric currently on screen.</div>
         <div class="row">
@@ -5474,9 +5509,34 @@
       alert(`Exposure gradient applied to ${result.changed} zones.`);
     });
 
+    const jitterSlider = shadow.getElementById('inp-jitter');
+    const jitterTxt = shadow.getElementById('txt-jitter');
+    const jitterHelpBtn = shadow.getElementById('btn-jitter-help');
+    const jitterHelpBox = shadow.getElementById('jitter-help-box');
+    const trueRandomChk = shadow.getElementById('chk-true-random');
+
+    if (jitterHelpBtn && jitterHelpBox) {
+      jitterHelpBtn.addEventListener('click', () => {
+        jitterHelpBox.style.display = jitterHelpBox.style.display === 'none' ? 'block' : 'none';
+      });
+    }
+
+    if (jitterSlider && jitterTxt && trueRandomChk) {
+      jitterSlider.addEventListener('input', () => {
+        jitterTxt.textContent = `${jitterSlider.value}%`;
+      });
+      // UX feature: Disable slider visually if True Randomness is checked
+      trueRandomChk.addEventListener('change', () => {
+         jitterSlider.disabled = trueRandomChk.checked;
+         jitterSlider.style.opacity = trueRandomChk.checked ? '0.5' : '1';
+      });
+    }
+
     shadow.getElementById('btn-bulk-fill')?.addEventListener('click', () => {
       const maxVal = parseFloat(shadow.getElementById('inp-bulk-max')?.value);
       const minVal = parseFloat(shadow.getElementById('inp-bulk-min')?.value);
+      const jitterVal = parseFloat(shadow.getElementById('inp-jitter')?.value || 16) / 100;
+      const isTrueRandom = !!shadow.getElementById('chk-true-random')?.checked;
 
       if (isNaN(maxVal) || isNaN(minVal)) {
         alert('Please enter valid numbers for the Max and Min values.');
@@ -5493,13 +5553,15 @@
       btn.style.opacity = '0.7';
       btn.disabled = true;
 
-      // BROADCAST TO ALL IFRAMES
+      // BROADCAST TO ALL IFRAMES WITH JITTER + RANDOMNESS FLAG
       chrome.runtime.sendMessage({
         type: 'broadcastToTab',
         payload: {
           type: 'applyBulkFillInFrame',
           maxVal: maxVal,
-          minVal: minVal
+          minVal: minVal,
+          jitter: jitterVal,
+          trueRandom: isTrueRandom
         }
       }, (response) => {
         btn.textContent = originalText;
@@ -5509,7 +5571,6 @@
         let totalApplied = 0;
         let totalFoundZones = 0;
 
-        // Tally up the responses from the iframe(s)
         if (response && response.results) {
           response.results.forEach(res => {
             if (res.payload && res.payload.ok) {
@@ -5532,17 +5593,19 @@
     shadow.getElementById('btn-nuclear-fill')?.addEventListener('click', () => {
       const btn = shadow.getElementById('btn-nuclear-fill');
       const originalText = btn.textContent;
+      const jitterVal = parseFloat(shadow.getElementById('inp-jitter')?.value || 16) / 100;
+      const isTrueRandom = !!shadow.getElementById('chk-true-random')?.checked;
+      
       btn.textContent = 'Generating 360° Data...';
       btn.disabled = true;
 
       chrome.runtime.sendMessage({
         type: 'broadcastToTab',
-        payload: { type: 'generateAllInFrame' }
+        payload: { type: 'generateAllInFrame', jitter: jitterVal, trueRandom: isTrueRandom }
       }, (response) => {
         btn.textContent = originalText;
         btn.disabled = false;
         
-        // Simplified success message that doesn't get confused by 0-zone parent frames
         if (response && response.results && response.results.some(r => r.payload && r.payload.ok)) {
             alert(`Success! 360° Data generated and injected into all visible zones.`);
         } else {
@@ -5550,7 +5613,6 @@
         }
       });
     });
-
 
     document.body.appendChild(host);
 
@@ -6284,7 +6346,7 @@
       if (msg.updatedRegistry) {
         metricRegistry = msg.updatedRegistry;
         // Subframes DO generate data!
-        generateAllClientMetrics(false);
+        generateAllClientMetrics(false, msg.jitter || 0.16, msg.trueRandom || false);
       } else {
         loadOverrides().then(() => {
           applyAllOverrides();
@@ -6408,7 +6470,7 @@
 
     if (msg.type === 'applyBulkFillInFrame') {
       // Allow all frames to participate, but we will stagger their saves
-      applyBulkFillToCurrentMetric(msg.maxVal, msg.minVal).then(result => {
+      applyBulkFillToCurrentMetric(msg.maxVal, msg.minVal, msg.jitter, msg.trueRandom).then(result => {
         sendResponse({ ok: true, frame: frameContextKey, ...result });
       });
       return true; // Keep channel open for async
@@ -6417,7 +6479,7 @@
     if (msg.type === 'generateAllInFrame') {
       // ONLY Top Frame runs the initial math. Subframes will wait for the 'refresh_from_storage' shout.
       if (isTopFrame) {
-        generateAllClientMetrics(true).then(result => {
+        generateAllClientMetrics(true, msg.jitter, msg.trueRandom).then(result => {
           sendResponse({ ...result, frame: frameContextKey });
         });
       } else {
