@@ -5342,6 +5342,31 @@
         border-top: 1px solid #eee;
         margin: 12px 0;
       }
+      /* TAB STYLES */
+      .tab-nav {
+        display: flex;
+        border-bottom: 1px solid #ececf6;
+        margin-bottom: 12px;
+        margin-top: 4px;
+      }
+      .tab-btn {
+        flex: 1;
+        background: none;
+        border: none;
+        padding: 8px 4px;
+        font-size: 10px;
+        font-weight: 700;
+        color: #888;
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        transition: all 0.2s;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      .tab-btn:hover { color: #2c2c8c; background: #fafafe; }
+      .tab-btn.active { color: #2c2c8c; border-bottom: 2px solid #2c2c8c; }
+      .tab-pane { display: none; }
+      .tab-pane.active { display: block; }
     `);
 
     shadow.adoptedStyleSheets = [sheet];
@@ -5378,105 +5403,152 @@
       <div class="tab-content active" style="display: block; ${disabledOverlayStyle}">
         
         <div class="section-label" style="color: #4a4a64; display: flex; align-items: center; gap: 6px;">
-          0. Data Realism (Jitter) 
+          Data Realism (Jitter) 
           <span id="btn-jitter-help" style="cursor:pointer; background:#e0e0f0; color:#4a4a64; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:bold;">?</span>
         </div>
         <div id="jitter-help-box" style="display:none; font-size:10px; color:#555; background:#f0f0fa; border: 1px solid #d0d0e0; padding:8px; border-radius:6px; margin-bottom:10px; line-height:1.4;">
           <strong>How it works:</strong><br>
-          <strong>Slider (Gradient Noise):</strong> Shifts the natural top-to-bottom data flow. At 40% Jitter, a zone's value shifts up or down by up to 20% of the total Max/Min spread. Crank it to 100% for wild swings!<br><br>
+          Normally, auto-generated data (both Bulk Fill and 360° Data) creates a perfect mathematical drop-off from top to bottom. For example, if you use Bulk Fill, and your Max value = 20 and Min value = 0, a zone sitting exactly in the middle of the page gets a value of exactly 10.<br><br>
+          <strong>Slider (Gradient Noise):</strong> Scrambles that middle zone's "position" in the gradient.<br>
+          • At <strong>40% Jitter</strong>, the ratio shifts by up to 20%. That middle zone will randomly land between <strong>6 and 14</strong>.<br>
+          • At <strong>100% Jitter</strong>, the ratio shifts by up to 50%. That middle zone could land anywhere from <strong>0 to 20</strong>. It preserves the top-to-bottom trend, but with highly realistic variance.<br><br>
           <strong>True Randomness:</strong> Destroys the top-to-bottom rule entirely. Every zone gets a completely random number between your Max and Min limits.
         </div>
         <div style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
           <input type="range" id="inp-jitter" min="0" max="100" step="1" value="16" style="flex:1;" ${isEditing ? '' : 'disabled'}>
           <span id="txt-jitter" style="font-weight:bold; width:40px; text-align:right; color:#2c2c8c;">16%</span>
         </div>
-        <div class="chk-row" style="margin-bottom: 16px;">
+        <div class="chk-row" style="margin-bottom: 12px;">
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
             <input type="checkbox" id="chk-true-random" ${isEditing ? '' : 'disabled'}>
             True Randomness (Ignore gradient)
           </label>
         </div>
-        <hr class="divider">
 
-        <div class="section-label" style="color: #2c2c8c;">1. Bulk Fill Current Metric</div>
-        <div class="hint" style="margin-top:-4px; margin-bottom:10px;">Auto-populates zero-value/empty zones for the metric currently on screen.</div>
-        <div class="row">
-          <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max Value (e.g. 15)" ${isEditing ? '' : 'disabled'}>
-          <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min Value (e.g. 1)" ${isEditing ? '' : 'disabled'}>
+        <div class="tab-nav">
+          <button class="tab-btn active" data-target="pane-bulk" ${isEditing ? '' : 'disabled'}>Bulk Fill</button>
+          <button class="tab-btn" data-target="pane-nuclear" ${isEditing ? '' : 'disabled'}>360° Data</button>
+          <button class="tab-btn" data-target="pane-exposure" ${isEditing ? '' : 'disabled'}>Exposure</button>
         </div>
-        <button class="btn btn-apply" id="btn-bulk-fill" style="margin-bottom: 4px;" ${isEditing ? '' : 'disabled'}>Fill Zeros for Current Metric</button>
-        
-        <hr class="divider">
 
-        <div class="section-label" style="color: #cc3333;">2. Global Metric Library Tuner</div>
-        <div class="hint" style="margin-top:-4px; margin-bottom:10px;">Adjust bounds before generating the "Nuclear" data story.</div>
-        
-        <div class="metric-tuner-list">
-          <div class="tuner-row" style="position: sticky; top: 0; background: #fff; z-index: 1; border-bottom: 1px solid #ccc; padding-bottom: 2px;">
-            <div class="section-label" style="margin:0">Metric</div>
-            <div class="section-label" style="margin:0; text-align:center;">Min</div>
-            <div class="section-label" style="margin:0; text-align:center;">Max</div>
+        <div id="pane-bulk" class="tab-pane active">
+          <div class="section-label" style="color: #2c2c8c; display: flex; align-items: center; gap: 6px;">
+            Bulk Fill Current Metric
+            <span id="btn-bulk-help" style="cursor:pointer; background:#e0e0f0; color:#4a4a64; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:bold;">?</span>
           </div>
-          ${Object.entries(metricRegistry).map(([name, config]) => `
-            <div class="tuner-row">
-              <div class="tuner-label" title="${name}">${name}</div>
-              <input class="tuner-inp metric-min" data-metric="${name}" type="number" value="${config.min}" ${isEditing ? '' : 'disabled'}>
-              <input class="tuner-inp metric-max" data-metric="${name}" type="number" value="${config.max}" ${isEditing ? '' : 'disabled'}>
+          <div id="bulk-help-box" style="display:none; font-size:10px; color:#555; background:#f0f0fa; border: 1px solid #d0d0e0; padding:8px; border-radius:6px; margin-bottom:10px; line-height:1.4;">
+            <strong>What it does:</strong> Finds all zones that have no data for the currently selected metric and populates them with a realistic top-to-bottom gradient between your Max and Min values.
+          </div>
+          <div class="row">
+            <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max Value (e.g. 15)" ${isEditing ? '' : 'disabled'}>
+            <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min Value (e.g. 1)" ${isEditing ? '' : 'disabled'}>
+          </div>
+          <button class="btn btn-apply" id="btn-bulk-fill" style="margin-bottom: 4px;" ${isEditing ? '' : 'disabled'}>Fill Zeros for Current Metric</button>
+        </div>
+
+        <div id="pane-nuclear" class="tab-pane">
+          <div class="section-label" style="color: #cc3333; display: flex; align-items: center; gap: 6px;">
+            Global Metric Library Tuner
+            <span id="btn-nuclear-help" style="cursor:pointer; background:#e0e0f0; color:#4a4a64; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:bold;">?</span>
+          </div>
+          <div id="nuclear-help-box" style="display:none; font-size:10px; color:#555; background:#f0f0fa; border: 1px solid #d0d0e0; padding:8px; border-radius:6px; margin-bottom:10px; line-height:1.4;">
+            <strong>What it does:</strong> Generates a full top-to-bottom gradient for <em>every single metric</em> in the library at once. This ensures that no matter what metric a prospect asks to see during a live pitch, realistic data is waiting for them.
+          </div>
+          
+          <div class="metric-tuner-list">
+            <div class="tuner-row" style="position: sticky; top: 0; background: #fff; z-index: 1; border-bottom: 1px solid #ccc; padding-bottom: 2px;">
+              <div class="section-label" style="margin:0">Metric</div>
+              <div class="section-label" style="margin:0; text-align:center;">Min</div>
+              <div class="section-label" style="margin:0; text-align:center;">Max</div>
             </div>
-          `).join('')}
-        </div>
-
-        <button class="btn btn-apply" id="btn-nuclear-fill" style="background: #cc3333; margin-bottom: 4px;" ${isEditing ? '' : 'disabled'}>🚀 Generate All Data</button>
-
-        <hr class="divider">
-
-        <div class="section-label">3. Exposure Auto-Seed Bounds</div>
-        <div class="row">
-          <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top %" ${isEditing ? '' : 'disabled'}>
-          <input id="inp-exp-bottom" class="inp" type="number" step="0.1" value="20" placeholder="Bottom %" ${isEditing ? '' : 'disabled'}>
-        </div>
-        <div class="chk-row">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="chk-exp-fixed-fold" ${isEditing ? '' : 'disabled'}>
-            Use fixed fold position
-          </label>
-        </div>
-        <div class="fold-row">
-          <input id="inp-exp-fixed-fold" class="inp" type="number" step="1" min="0" value="${defaultFoldPositionPx}" placeholder="Fold px" disabled>
-          <span id="txt-exp-viewport" class="hint" style="margin:0">Current viewport: ${defaultFoldPositionPx}px</span>
-        </div>
-        <div class="chk-row">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="chk-exp-skip-edited" checked ${isEditing ? '' : 'disabled'}>
-            Skip already edited zones
-          </label>
-        </div>
-        <div class="chk-row">
-          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
-            <input type="checkbox" id="chk-exp-per-pane" ${isEditing ? '' : 'disabled'}>
-            Use per-pane bounds
-          </label>
-        </div>
-        <div id="exp-pane-bounds" class="pane-bounds">
-          ${paneKeys.length === 0
-            ? '<div class="hint" style="margin-bottom:0">No panes detected</div>'
-            : paneKeys.map((paneKey, idx) => `
-              <div class="pane-row">
-                <div class="pane-name" title="${escHtml(paneKey)}">Pane ${idx + 1}</div>
-                <input class="inp exp-pane-top" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="100" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
-                <input class="inp exp-pane-bottom" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="20" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
+            ${Object.entries(metricRegistry).map(([name, config]) => `
+              <div class="tuner-row">
+                <div class="tuner-label" title="${name}">${name}</div>
+                <input class="tuner-inp metric-min" data-metric="${name}" type="number" value="${config.min}" ${isEditing ? '' : 'disabled'}>
+                <input class="tuner-inp metric-max" data-metric="${name}" type="number" value="${config.max}" ${isEditing ? '' : 'disabled'}>
               </div>
-            `).join('')
-          }
+            `).join('')}
+          </div>
+
+          <button class="btn btn-apply" id="btn-nuclear-fill" style="background: #cc3333; margin-bottom: 4px;" ${isEditing ? '' : 'disabled'}>🚀 Generate All Data</button>
         </div>
-        <div class="hint">Uses current viewport as fold by default: zones above fold get Top %, then values decrease toward Bottom % below fold.</div>
-        <button class="btn btn-apply" id="btn-auto-exposure" style="background: #4a4a64;" ${isEditing ? '' : 'disabled'}>Apply Exposure Gradient</button>
+
+        <div id="pane-exposure" class="tab-pane">
+          <div class="section-label" style="display: flex; align-items: center; gap: 6px;">
+            Exposure Auto-Seed Bounds
+            <span id="btn-exposure-help" style="cursor:pointer; background:#e0e0f0; color:#4a4a64; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:bold;">?</span>
+          </div>
+          <div id="exposure-help-box" style="display:none; font-size:10px; color:#555; background:#f0f0fa; border: 1px solid #d0d0e0; padding:8px; border-radius:6px; margin-bottom:10px; line-height:1.4;">
+            <strong>How it works:</strong><br>
+            Quickly generates a realistic scroll drop-off specifically for the <strong>Exposure Rate</strong> metric. Zones visible above the fold get the <strong>Top %</strong>, and values gradually decrease as you scroll down the page, ending at the <strong>Bottom %</strong>.<br><br>
+            <strong>Options:</strong><br>
+            • <strong>Use fixed fold position:</strong> By default, the "fold" is calculated using your current browser window height. Check this to type in a custom pixel height if you want to simulate the drop-off of a different device (like a smaller laptop screen).<br>
+            • <strong>Skip already edited zones:</strong> Leave this checked to protect any specific zones you’ve already manually edited. Uncheck it to overwrite the entire page with the new gradient.<br>
+            • <strong>Use per-pane bounds:</strong> Built for Compare Mode! It lets you set different Top and Bottom limits for each side of the screen (e.g., Prove that Variant B keeps 50% of users scrolling to the bottom, while Variant A drops to 20%).
+          </div>
+          <div class="row">
+            <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top %" ${isEditing ? '' : 'disabled'}>
+            <input id="inp-exp-bottom" class="inp" type="number" step="0.1" value="20" placeholder="Bottom %" ${isEditing ? '' : 'disabled'}>
+          </div>
+          <div class="chk-row">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" id="chk-exp-fixed-fold" ${isEditing ? '' : 'disabled'}>
+              Use fixed fold position
+            </label>
+          </div>
+          <div class="fold-row">
+            <input id="inp-exp-fixed-fold" class="inp" type="number" step="1" min="0" value="${defaultFoldPositionPx}" placeholder="Fold px" disabled>
+            <span id="txt-exp-viewport" class="hint" style="margin:0">Current viewport: ${defaultFoldPositionPx}px</span>
+          </div>
+          <div class="chk-row">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" id="chk-exp-skip-edited" checked ${isEditing ? '' : 'disabled'}>
+              Skip already edited zones
+            </label>
+          </div>
+          <div class="chk-row">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+              <input type="checkbox" id="chk-exp-per-pane" ${isEditing ? '' : 'disabled'}>
+              Use per-pane bounds
+            </label>
+          </div>
+          <div id="exp-pane-bounds" class="pane-bounds">
+            ${paneKeys.length === 0
+              ? '<div class="hint" style="margin-bottom:0">No panes detected</div>'
+              : paneKeys.map((paneKey, idx) => `
+                <div class="pane-row">
+                  <div class="pane-name" title="${escHtml(paneKey)}">Pane ${idx + 1}</div>
+                  <input class="inp exp-pane-top" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="100" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
+                  <input class="inp exp-pane-bottom" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="20" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
+                </div>
+              `).join('')
+            }
+          </div>
+          <div class="hint">Uses current viewport as fold by default.</div>
+          <button class="btn btn-apply" id="btn-auto-exposure" style="background: #4a4a64;" ${isEditing ? '' : 'disabled'}>Apply Exposure Gradient</button>
+        </div>
+
       </div>
     `;
 
     shadow.innerHTML = '';
     shadow.adoptedStyleSheets = [sheet];
     shadow.appendChild(panel);
+
+    // TAB SWITCHING LOGIC
+    const tabBtns = shadow.querySelectorAll('.tab-btn');
+    const tabPanes = shadow.querySelectorAll('.tab-pane');
+    tabBtns.forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        if (btn.disabled) return;
+        // Remove active class from all tabs and panes
+        tabBtns.forEach(b => b.classList.remove('active'));
+        tabPanes.forEach(p => p.classList.remove('active'));
+        // Add active class to clicked tab and its target pane
+        btn.classList.add('active');
+        shadow.getElementById(btn.dataset.target).classList.add('active');
+      });
+    });
 
     const chkPerPane = shadow.getElementById('chk-exp-per-pane');
     const paneBoundsHost = shadow.getElementById('exp-pane-bounds');
@@ -5566,15 +5638,21 @@
 
     const jitterSlider = shadow.getElementById('inp-jitter');
     const jitterTxt = shadow.getElementById('txt-jitter');
-    const jitterHelpBtn = shadow.getElementById('btn-jitter-help');
-    const jitterHelpBox = shadow.getElementById('jitter-help-box');
-    const trueRandomChk = shadow.getElementById('chk-true-random');
-
-    if (jitterHelpBtn && jitterHelpBox) {
-      jitterHelpBtn.addEventListener('click', () => {
-        jitterHelpBox.style.display = jitterHelpBox.style.display === 'none' ? 'block' : 'none';
-      });
-    }
+    // HELP BUTTONS LOGIC
+    [
+      { btn: 'btn-jitter-help', box: 'jitter-help-box' },
+      { btn: 'btn-bulk-help', box: 'bulk-help-box' },
+      { btn: 'btn-nuclear-help', box: 'nuclear-help-box' },
+      { btn: 'btn-exposure-help', box: 'exposure-help-box' }
+    ].forEach(item => {
+      const btn = shadow.getElementById(item.btn);
+      const box = shadow.getElementById(item.box);
+      if (btn && box) {
+        btn.addEventListener('click', () => {
+          box.style.display = box.style.display === 'none' ? 'block' : 'none';
+        });
+      }
+    });
 
     if (jitterSlider && jitterTxt && trueRandomChk) {
       jitterSlider.addEventListener('input', () => {
