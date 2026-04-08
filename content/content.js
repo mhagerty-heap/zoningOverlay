@@ -2976,7 +2976,8 @@
     
     // Add "(Right Pane)" dynamically if we are on a split screen
     const isSplitScreen = window.innerWidth > 1200; // rough heuristic for compare mode
-    const sideLabel = isSplitScreen && paneSide === 'right' ? ' (Right Pane)' : (isSplitScreen ? ' (Left Pane)' : '');
+    const isRight = typeof paneSide === 'string' && paneSide.includes('right');
+    const sideLabel = isSplitScreen ? (isRight ? ' (Right Pane)' : ' (Left Pane)') : '';
     
     return `${base} ${existingOfBase + 1}${sideLabel}`;
   }
@@ -4142,11 +4143,13 @@
   }
 
   async function applyExposureGradientOverrides(options = {}) {
+    isBulkGenerating = true; // SHIELD ON: Prevent storage wipes while right pane sleeps!
     if (!options.selectedMetricType) {
       refreshMetricTypeName();
     }
     const selectedMetricType = String(options.selectedMetricType || csMetricTypeName || '').trim();
     if (!isExposureRateMetric(selectedMetricType)) {
+      isBulkGenerating = false;
       return {
         ok: false,
         reason: 'Exposure Rate is not the selected metric',
@@ -4211,11 +4214,18 @@
         return a.order - b.order;
       });
 
-      const paneTop = Number.isFinite(Number(perPaneBounds?.[paneKey]?.top))
-        ? Number(perPaneBounds[paneKey].top)
+      // RE-USE Nuke/Bulk Logic: Just check if the pane key contains 'right' or 'left'
+      let matchedBounds = perPaneBounds?.[paneKey];
+      if (!matchedBounds && perPaneBounds) {
+         if (paneKey.includes('right') && perPaneBounds['right']) matchedBounds = perPaneBounds['right'];
+         else if (paneKey.includes('left') && perPaneBounds['left']) matchedBounds = perPaneBounds['left'];
+      }
+
+      const paneTop = Number.isFinite(Number(matchedBounds?.top))
+        ? Number(matchedBounds.top)
         : topBound;
-      const paneBottom = Number.isFinite(Number(perPaneBounds?.[paneKey]?.bottom))
-        ? Number(perPaneBounds[paneKey].bottom)
+      const paneBottom = Number.isFinite(Number(matchedBounds?.bottom))
+        ? Number(matchedBounds.bottom)
         : bottomBound;
 
       let paneApplied = 0;
@@ -4278,11 +4288,28 @@
     }
 
     if (applied > 0) {
-      if (options.persistMode === 'merge') await persistOverridesMerged();
-      else await persistOverrides();
+      // PRO FIX: Multi-signal detection for the Right Pane
+      const isRightSide = 
+        (typeof window.__csDemoPaneSide === 'string' && window.__csDemoPaneSide.includes('right')) || 
+        Array.from(paneRows.keys()).some(k => k.includes('right')) ||
+        (window.frameElement && window.frameElement.id.includes('right'));
+
+      // Anti-Collision: If we are the right side, wait for the left side to finish saving first
+      if (isRightSide && !isTopFrame && options.persistMode === 'merge') {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+
+      if (options.persistMode === 'merge') {
+        await persistOverridesMerged();
+      } else {
+        await persistOverrides();
+      }
+
       syncZoneWatchers();
       updateToolbar();
     }
+
+    isBulkGenerating = false; // SHIELD OFF
 
     return {
       ok: true,
@@ -4376,6 +4403,7 @@
       Object.entries(overrides).map(([key, ov]) => [key, `${ov?.metric || ''}|${ov?.value ?? ''}`])
     );
 
+    let remoteChangedCount = 0; // FIX: Define the variable so it doesn't crash!
     const localResult = await applyExposureGradientOverrides(options);
     const debug = {
       requestId: '',
@@ -4396,36 +4424,51 @@
 
     if (isTopFrame) {
       const selectedMetricType = localResult.selectedMetricType || csMetricTypeName || '';
-      const dispatch = await dispatchExposureRequestToFrames({
-        ...options,
-        selectedMetricType
+      
+      // BULLETPROOF MESSAGING (Matches Bulk & Nuke logic to safely await the 400ms delay)
+      const remoteResponses = await new Promise(resolve => {
+        chrome.runtime.sendMessage({
+          type: 'broadcastToTab',
+          payload: {
+            type: 'applyExposureGradientInFrame',
+            originFrameContextKey: frameContextKey,
+            options: { ...options, selectedMetricType, persistMode: 'merge' }
+          }
+        }, (response) => {
+          if (!response || !response.results) return resolve([]);
+          const validReplies = response.results
+            .filter(r => r.payload && r.payload.ok && !r.payload.skippedOrigin)
+            .map(r => r.payload);
+          resolve(validReplies);
+        });
       });
-      debug.requestId = dispatch.requestId || '';
 
-      // Give subframes a moment to persist then refresh top-frame view/state.
-      await new Promise(resolve => setTimeout(resolve, 260));
-      const remoteResponses = await getExposureResponsesForRequest(debug.requestId);
       debug.remote.respondedFrames = remoteResponses.length;
-      remoteResponses.forEach(row => {
-        debug.remote.detectedZones += Number(row.detectedZones) || 0;
-        debug.remote.considered += Number(row.considered) || 0;
-        debug.remote.applied += Number(row.applied) || 0;
-        debug.remote.skippedEdited += Number(row.skippedEdited) || 0;
-      });
-      await loadOverrides();
-      applyAllOverrides();
-      updateToolbar();
-      clearExposureResponses(debug.requestId);
+        remoteResponses.forEach(row => {
+          debug.remote.detectedZones += Number(row.detectedZones) || 0;
+          debug.remote.considered += Number(row.considered) || 0;
+          debug.remote.applied += Number(row.applied) || 0;
+          debug.remote.skippedEdited += Number(row.skippedEdited) || 0;
+          
+          // CRITICAL UI FIX: Aggregate applied count to total changed!
+          if (row.ok && Number(row.applied) > 0) remoteChangedCount += Number(row.applied);
+        });
+
+      // Wait long enough for the Right Pane's 500ms stagger + disk write time
+        await new Promise(resolve => setTimeout(resolve, 800));
+        await loadOverrides();
+        applyAllOverrides();
+        updateToolbar();
     }
 
-    const changed = Object.entries(overrides).reduce((count, [key, ov]) => {
+    const localChanged = Object.entries(overrides).reduce((count, [key, ov]) => {
       const sig = `${ov?.metric || ''}|${ov?.value ?? ''}`;
       return count + (beforeSnapshot.get(key) !== sig ? 1 : 0);
     }, 0);
 
     return {
       ...localResult,
-      changed,
+      changed: localChanged + remoteChangedCount,
       debug
     };
   }
@@ -5374,9 +5417,17 @@
     const panel = document.createElement('div');
     panel.className = 'panel';
 
-    const paneKeys = Array.from(
+    // FIX: Ensure we have the latest Compare Mode state
+    if (isTopFrame) readCsMetricTypeName();
+
+    let paneKeys = Array.from(
       new Set(getCandidateZoneElements().map(el => getPaneKey(el)).filter(Boolean))
     ).sort();
+
+    // Re-use our existing boolean! If the zones are hidden in iframes, just force Left/Right UI
+    if (paneKeys.length === 0 && isCompareMode) {
+      paneKeys = ['left', 'right'];
+    }
     const defaultFoldPositionPx = Math.max(0, Math.round(window.innerHeight || 0));
 
     const escHtml = str => String(str || '')
@@ -5517,7 +5568,7 @@
               ? '<div class="hint" style="margin-bottom:0">No panes detected</div>'
               : paneKeys.map((paneKey, idx) => `
                 <div class="pane-row">
-                  <div class="pane-name" title="${escHtml(paneKey)}">Pane ${idx + 1}</div>
+                  <div class="pane-name" title="${escHtml(paneKey)}">${paneKey === 'left' ? 'Left Pane' : (paneKey === 'right' ? 'Right Pane' : 'Pane ' + (idx + 1))}</div>
                   <input class="inp exp-pane-top" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="100" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
                   <input class="inp exp-pane-bottom" data-pane="${escHtml(paneKey)}" type="number" step="0.1" value="20" style="padding:4px 6px;font-size:11px;" ${isEditing ? '' : 'disabled'}>
                 </div>
@@ -5615,7 +5666,8 @@
         foldMode: useFixedFold ? 'fixed' : 'viewport',
         foldPositionPx,
         perPaneBounds,
-        decimals: 1
+        decimals: 1,
+        persistMode: 'merge' // FORCE MERGE MODE
       });
 
       if (!result.ok) {
@@ -5638,6 +5690,7 @@
 
     const jitterSlider = shadow.getElementById('inp-jitter');
     const jitterTxt = shadow.getElementById('txt-jitter');
+    const trueRandomChk = shadow.getElementById('chk-true-random');
     // HELP BUTTONS LOGIC
     [
       { btn: 'btn-jitter-help', box: 'jitter-help-box' },
