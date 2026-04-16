@@ -5026,12 +5026,16 @@
       return { applied: 0, totalZones: zoneElements.length };
     }
 
-    const isCurrency = hasCurrency || /(revenue|sales|order|transaction|aov|cart|price)/i.test(currentMetricName);
-    const isPercentage = hasPercent || /(rate|ratio|conversion|bounce|engagement|attractiveness|activity|exposure)/i.test(currentMetricName) || currentMetricName.includes('%');
-    const isTime = hasTime || /(time|duration|seconds?)/i.test(currentMetricName);
-    const isDecimal = hasDecimal || /(recurrence|average|per session|per user)/i.test(currentMetricName);
+    // DYNAMIC FORMATTER: Evaluates the correct format per-zone!
+    const formatMetricValue = (val, targetName, existingMetric) => {
+      const name = String(targetName || '').toLowerCase();
+      const existing = String(existingMetric || '').trim();
 
-    const formatMetricValue = (val) => {
+      const isCurrency = /[€$£¥]/.test(existing) || /(revenue|sales|order|transaction|aov|cart|price)/i.test(name);
+      const isPercentage = existing.includes('%') || /(rate|ratio|conversion|bounce|engagement|attractiveness|activity|exposure)/i.test(name) || name.includes('%');
+      const isTime = /\d\s*s\b/.test(existing) || existing.endsWith('s') || /(time|duration|seconds?)/i.test(name);
+      const isDecimal = (/[\.,]\d/.test(existing) && !isCurrency && !isPercentage && !isTime) || /(recurrence|average|per session|per user)/i.test(name);
+
       if (isCurrency) return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
       if (isPercentage) return `${val.toFixed(1)}%`;
       if (isTime) return `${val.toFixed(1)}s`;
@@ -5074,7 +5078,8 @@
           numericValue = pMax - (noisyRatio * (pMax - pMin));
         }
         
-        const displayMetric = formatMetricValue(numericValue);
+        // PASS THE PANE'S SPECIFIC METRIC TO THE FORMATTER
+        const displayMetric = formatMetricValue(numericValue, targetMetricName, row.el.getAttribute('metric'));
         const metricKey = `${row.zoneKey}@${targetMetricName}`;
         
         overrides[metricKey] = { 
