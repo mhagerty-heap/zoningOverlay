@@ -30,7 +30,7 @@ A Chrome extension designed for PreSales and Solution Consulting teams to easily
 
 Click the **"Advanced"** button in the toolbar to access bulk operations. 
 
-> **⚠️ Important:** The "Edit Zones" toggle must be turned **ON** to unlock and use these features.
+**⚠️ Important:** The "Edit Zones" toggle must be turned **ON** to unlock and use these features.
 
 **⚠️ Important:** Note on Compare Mode: Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
 
