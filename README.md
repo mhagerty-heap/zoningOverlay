@@ -32,11 +32,11 @@ Click the **"Advanced"** button in the toolbar to access bulk operations.
 
 **⚠️ Important:** The "Edit Zones" toggle must be turned **ON** to unlock and use these features.
 
-**⚠️ Important:** Note on Compare Mode: Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
-
 * **1. Bulk Fill Current Metric**: Instantly populate all un-edited zones on the screen with data for the metric you are currently viewing. It leaves your manually edited zones alone, but fills all the empty/native zones with scaled data between your chosen Min and Max values.
 * **2. Global Metric Library Tuner (360° Data Generation)**: The ultimate demo builder. Instead of generating data for just one metric, this allows you to set Min/Max bounds for *every* metric in the library (Revenue, Click Rate, Attractiveness, Time, etc.). Clicking **🚀 Generate All Data** injects tailored data for every single metric into all visible zones simultaneously. You can then seamlessly switch between metrics in the  UI dropdown, and the extension will instantly swap the data on screen to match the active tab!
 * **3. Exposure Auto-Seed Bounds**: Quickly build a realistic "scroll depth" narrative. Defines a Top % and Bottom % for exposure. Zones above the fold are automatically assigned the Top %, and zones below the fold gradually decrease toward the Bottom % the further down the page they go. Smartly handles side-by-side compare modes as well.
+
+**⚠️ Important:** Note on Compare Mode: Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
 
 ### Toolbar Options
 
