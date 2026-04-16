@@ -5062,6 +5062,12 @@
       const pMax = maxVal * variance;
       const pMin = minVal * variance;
 
+      // EXPLICIT LABELING: Define the exact suffix based on the mode
+      let modeSuffix = ' - Non Compare';
+      if (isCompareMode) {
+          modeSuffix = isRightPane ? ' - Compare (Right Pane)' : ' - Compare (Left Pane)';
+      }
+
       group.forEach((row, index) => {
         if (!row.zoneKey) return;
         const targetMetricName = getActiveMetricForZone(row.zoneKey) || currentMetricName;
@@ -5086,7 +5092,7 @@
             metric: displayMetric, 
             value: numericValue, 
             origMetric: '—', 
-            zoneName: `${targetMetricName} Bulk`, 
+            zoneName: `${targetMetricName} Bulk${modeSuffix}`, 
             csMetricTypeName: targetMetricName 
         };
 
@@ -5154,6 +5160,12 @@
         const pMax = m.max * variance;
         const pMin = m.min * variance;
 
+        // EXPLICIT LABELING: Define the exact suffix based on the mode
+        let modeSuffix = ' - Non Compare';
+        if (isCompareMode) {
+            modeSuffix = isRightPane ? ' - Compare (Right Pane)' : ' - Compare (Left Pane)';
+        }
+
         paneZones.forEach((row, index) => {
           let val = pMax;
           if (trueRandom) {
@@ -5181,12 +5193,12 @@
           }
 
           const overrideKey = `${row.key}@${m.name}`;
-          const sideLabel = getPaneLabelFromKey(row.key); // Append the correct pane side!
+          
           overrides[overrideKey] = { 
               metric: display, 
               value: val, 
               origMetric: '—', 
-              zoneName: `${m.name} Data${sideLabel}`, 
+              zoneName: `${m.name} Data${modeSuffix}`, 
               csMetricTypeName: m.name 
           };
         });
@@ -5482,7 +5494,8 @@
             <span id="btn-bulk-help" style="cursor:pointer; background:#e0e0f0; color:#4a4a64; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:bold;">?</span>
           </div>
           <div id="bulk-help-box" style="display:none; font-size:10px; color:#555; background:#f0f0fa; border: 1px solid #d0d0e0; padding:8px; border-radius:6px; margin-bottom:10px; line-height:1.4;">
-            <strong>What it does:</strong> Finds all zones that have no data for the currently selected metric and populates them with a realistic top-to-bottom gradient between your Max and Min values.
+            <strong>What it does:</strong> Finds all zones that have no data for the currently selected metric and populates them with a realistic top-to-bottom gradient between your Max and Min values.<br><br>
+            <strong>⚠️ Note on Compare Mode:</strong> Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
           </div>
           <div class="row">
             <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max Value (e.g. 15)" ${isEditing ? '' : 'disabled'}>
@@ -5497,7 +5510,8 @@
             <span id="btn-nuclear-help" style="cursor:pointer; background:#e0e0f0; color:#4a4a64; border-radius:50%; width:14px; height:14px; display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:bold;">?</span>
           </div>
           <div id="nuclear-help-box" style="display:none; font-size:10px; color:#555; background:#f0f0fa; border: 1px solid #d0d0e0; padding:8px; border-radius:6px; margin-bottom:10px; line-height:1.4;">
-            <strong>What it does:</strong> Generates a full top-to-bottom gradient for <em>every single metric</em> in the library at once. This ensures that no matter what metric a prospect asks to see during a live pitch, realistic data is waiting for them.
+            <strong>What it does:</strong> Generates a full top-to-bottom gradient for <em>every single metric</em> in the library at once. This ensures that no matter what metric a prospect asks to see during a live pitch, realistic data is waiting for them.<br><br>
+            <strong>⚠️ Note on Compare Mode:</strong> Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
           </div>
           
           <div class="metric-tuner-list">
@@ -5529,7 +5543,8 @@
             <strong>Options:</strong><br>
             • <strong>Use fixed fold position:</strong> By default, the "fold" is calculated using your current browser window height. Check this to type in a custom pixel height if you want to simulate the drop-off of a different device (like a smaller laptop screen).<br>
             • <strong>Skip already edited zones:</strong> Leave this checked to protect any specific zones you’ve already manually edited. Uncheck it to overwrite the entire page with the new gradient.<br>
-            • <strong>Use per-pane bounds:</strong> Built for Compare Mode! It lets you set different Top and Bottom limits for each side of the screen (e.g., Prove that Variant B keeps 50% of users scrolling to the bottom, while Variant A drops to 20%).
+            • <strong>Use per-pane bounds:</strong> Built for Compare Mode! It lets you set different Top and Bottom limits for each side of the screen (e.g., Prove that Variant B keeps 50% of users scrolling to the bottom, while Variant A drops to 20%).<br><br>
+            <strong>⚠️ Note on Compare Mode:</strong> Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
           </div>
           <div class="row">
             <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top %" ${isEditing ? '' : 'disabled'}>
