@@ -47,4 +47,4 @@ Click the **"Advanced"** button in the toolbar to access bulk operations.
 * This extension works by manipulating the DOM locally in your browser. It **does not** send any data to  servers or permanently alter the actual analysis.
 * If the page structure changes significantly, you may need to re-apply or adjust your mocked zones.
 * The "Edit Zones" toggle must be turned **ON** to unlock and use these features.
-* Note on Compare Mode: Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
+* Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
