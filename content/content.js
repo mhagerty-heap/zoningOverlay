@@ -5105,37 +5105,19 @@
     return { applied, totalZones: zoneElements.length };
   }
 
-  async function generateAllClientMetrics(shout = true, jitter = 0.16, trueRandom = false) {
+  async function generateAllClientMetrics(updatedRegistry, jitter = 0.16, trueRandom = false) {
     isBulkGenerating = true;
-    const shadow = document.querySelector('#cs-demo-exposure-host')?.shadowRoot;
-    if (shadow) {
-      shadow.querySelectorAll('.tuner-inp').forEach(inp => {
-        const name = inp.dataset.metric;
-        const val = parseFloat(inp.value);
-        if (name && metricRegistry[name] && !isNaN(val)) {
-          if (inp.classList.contains('metric-min')) {
-            metricRegistry[name].min = val;
-          } else if (inp.classList.contains('metric-max')) {
-            metricRegistry[name].max = val;
-          }
-        }
-      });
+    
+    if (updatedRegistry) {
+      metricRegistry = updatedRegistry;
     }
 
-    if (isTopFrame && shout) {
-      readCsMetricTypeName(true); // Force update state
-      chrome.runtime.sendMessage({
-        type: 'broadcastToTab',
-        payload: { 
-          type: 'refresh_from_storage', 
-          updatedRegistry: JSON.parse(JSON.stringify(metricRegistry)),
-          metrics: csActiveMetrics,
-          isCompare: isCompareMode,
-          jitter: jitter,
-          trueRandom: trueRandom
-        }
-      });
+    if (isTopFrame) {
+      readCsMetricTypeName(true); // Whispers identity to subframes
     }
+
+    // DIRECT CABLE FIX: Give the whisper 150ms to settle and DOM to stabilize
+    await new Promise(resolve => setTimeout(resolve, 150));
 
     const metricsLibrary = Object.entries(metricRegistry).map(([name, config]) => ({
       name, ...config
@@ -5194,21 +5176,28 @@
           }
 
           const overrideKey = `${row.key}@${m.name}`;
+          const sideLabel = getPaneLabelFromKey(row.key); // Append the correct pane side!
           overrides[overrideKey] = { 
               metric: display, 
               value: val, 
               origMetric: '—', 
-              zoneName: `${m.name} Data`, 
+              zoneName: `${m.name} Data${sideLabel}`, 
               csMetricTypeName: m.name 
           };
         });
       });
     });
 
-    // Anti-Collision Stagger: Right pane waits 400ms before merging storage
-    const hasRightPane = Object.keys(panes).some(k => k.includes('right'));
-    if (hasRightPane && !isTopFrame) {
-      await new Promise(resolve => setTimeout(resolve, 400));
+    // PRO FIX: Stagger all panes to survive SPA ghost-zone collisions
+    const hasRightPane = Object.keys(panes).some(k => k.includes('right')) || window.__csDemoPaneSide === 'right';
+    const hasLeftPane = Object.keys(panes).some(k => k.includes('left')) || window.__csDemoPaneSide === 'left';
+    
+    if (!isTopFrame) {
+      if (hasRightPane) {
+        await new Promise(resolve => setTimeout(resolve, 600));
+      } else if (hasLeftPane) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
     }
 
     await persistOverridesMerged(); // Safe merge
@@ -5782,16 +5771,33 @@
       const jitterVal = parseFloat(shadow.getElementById('inp-jitter')?.value || 16) / 100;
       const isTrueRandom = !!shadow.getElementById('chk-true-random')?.checked;
       
+      // Scrape the tuner inputs from the Top Frame UI
+      const updatedRegistry = JSON.parse(JSON.stringify(metricRegistry));
+      shadow.querySelectorAll('.tuner-inp').forEach(inp => {
+        const name = inp.dataset.metric;
+        const val = parseFloat(inp.value);
+        if (name && updatedRegistry[name] && !isNaN(val)) {
+          if (inp.classList.contains('metric-min')) updatedRegistry[name].min = val;
+          else if (inp.classList.contains('metric-max')) updatedRegistry[name].max = val;
+        }
+      });
+
       btn.textContent = 'Generating 360° Data...';
       btn.disabled = true;
 
+      // USE DIRECT CABLE MESSAGING
       chrome.runtime.sendMessage({
         type: 'broadcastToTab',
-        payload: { type: 'generateAllInFrame', jitter: jitterVal, trueRandom: isTrueRandom }
-      }, (response) => {
+        payload: { type: 'generateAllInFrame', jitter: jitterVal, trueRandom: isTrueRandom, updatedRegistry }
+      }, async (response) => {
         btn.textContent = originalText;
         btn.disabled = false;
         
+        // Sync Top Frame UI safely after all iframes are finished saving!
+        await loadOverrides();
+        applyAllOverrides();
+        updateToolbar();
+
         if (response && response.results && response.results.some(r => r.payload && r.payload.ok)) {
             alert(`Success! 360° Data generated and injected into all visible zones.`);
         } else {
@@ -6529,16 +6535,10 @@
          csMetricTypeName = msg.activeMetricName;
       }
       
-      if (msg.updatedRegistry) {
-        metricRegistry = msg.updatedRegistry;
-        // Subframes DO generate data!
-        generateAllClientMetrics(false, msg.jitter || 0.16, msg.trueRandom || false);
-      } else {
-        loadOverrides().then(() => {
-          applyAllOverrides();
-          syncZoneWatchers();
-        });
-      }
+      loadOverrides().then(() => {
+        applyAllOverrides();
+        syncZoneWatchers();
+      });
       return true;
     }
 
@@ -6673,14 +6673,10 @@
     }
 
     if (msg.type === 'generateAllInFrame') {
-      // ONLY Top Frame runs the initial math. Subframes will wait for the 'refresh_from_storage' shout.
-      if (isTopFrame) {
-        generateAllClientMetrics(true, msg.jitter, msg.trueRandom).then(result => {
-          sendResponse({ ...result, frame: frameContextKey });
-        });
-      } else {
-        sendResponse({ ok: true, skipped: true, frame: frameContextKey });
-      }
+      // Everyone runs it simultaneously! Stagger is handled natively inside.
+      generateAllClientMetrics(msg.updatedRegistry, msg.jitter, msg.trueRandom).then(result => {
+        sendResponse({ ok: true, frame: frameContextKey, ...result });
+      });
       return true; 
     }
 
