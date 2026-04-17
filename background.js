@@ -17,11 +17,18 @@ function isContentsquareUrl(url) {
   return /(^https?:\/\/)([^/]*\.)?contentsquare\.com\//i.test(url);
 }
 
-function isZoningUrl(url) {
+// UPDATED: Now detects BOTH Zoning and Journey Analysis pages
+function isEligibleUrl(url) {
   if (!isContentsquareUrl(url)) return false;
-  return /\/analyze\/zoning(?:-v2)?(?:\/|\b|[#?])/i.test(url)
+  
+  const isZoning = /\/analyze\/zoning(?:-v2)?(?:\/|\b|[#?])/i.test(url)
     || /#\/analyze\/zoning(?:-v2)?\//i.test(url)
     || /#\/analyze\/zoning(?:-v2)?\b/i.test(url);
+
+  // JOURNEY ONLY: Must have navigation-path BUT must NOT have funnel
+  const isJourney = url.includes('/analyze/navigation-path') && !url.includes('/navigation-path/funnel');
+
+  return isZoning || isJourney;
 }
 
 function getExtensionEnabled() {
@@ -34,19 +41,20 @@ function getExtensionEnabled() {
 
 function setActionBadge(tabId, enabled) {
   const badgeText = enabled ? 'ON' : 'OFF';
-  const badgeColor = enabled ? '#16a34a' : '#6b7280';
+  const badgeColor = enabled ? '#16a34a' : '#6b7280'; // Green for ON, Gray for OFF
 
   chrome.action.setBadgeText({ tabId, text: badgeText }).catch(() => {});
   chrome.action.setBadgeBackgroundColor({ tabId, color: badgeColor }).catch(() => {});
   chrome.action.setBadgeTextColor?.({ tabId, color: '#ffffff' }).catch(() => {});
 }
 
+// UPDATED: Now enables the icon for Journey pages too
 async function updateActionStateForTab(tabId, url) {
   if (typeof tabId !== 'number') return;
   const enabled = await getExtensionEnabled();
-  const zoning = isZoningUrl(url || '');
+  const eligible = isEligibleUrl(url || '');
 
-  if (!zoning) {
+  if (!eligible) {
     await chrome.action.disable(tabId).catch(() => {});
     await chrome.action.setBadgeText({ tabId, text: '' }).catch(() => {});
     return;
@@ -132,12 +140,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     chrome.tabs.get(tabId).then(async tab => {
       const enabled = await getExtensionEnabled();
+      const url = tab?.url || '';
       sendResponse({
         ok: true,
         enabled,
-        isZoningPage: isZoningUrl(tab?.url || ''),
-        isContentsquarePage: isContentsquareUrl(tab?.url || ''),
-        url: tab?.url || ''
+        isZoningPage: isEligibleUrl(url), // Broadened to include Journeys
+        isContentsquarePage: isContentsquareUrl(url),
+        url: url
       });
     }).catch(error => {
       sendResponse({ ok: false, error: error?.message || String(error) });

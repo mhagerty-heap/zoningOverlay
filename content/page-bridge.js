@@ -80,10 +80,7 @@
       const isControl = !!(node.matches && node.matches('button, [role="tab"], [role="button"]'));
       if (!isControl) continue;
       const text = (node.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-      // Use the first whitespace-delimited token so counts/icons don't break matching
-      // (e.g. "clicks 4,521" or "moves ↑" still resolve to the correct layer).
       const firstWord = text.split(' ')[0];
-      console.debug('[CS page-bridge] layer tab candidate:', JSON.stringify(text), '→ firstWord:', firstWord);
       if (known.includes(firstWord)) return firstWord;
     }
     return '';
@@ -102,7 +99,6 @@
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
     const heatmapLayer = findHeatmapLayerFromPath(path);
 
-    // Outside edit mode, only forward explicit heatmap layer tab interactions.
     if (!state.editMode && !heatmapLayer) {
       return;
     }
@@ -131,4 +127,251 @@
     window.addEventListener(type, event => emitInteraction(event, type), true);
     document.addEventListener(type, event => emitInteraction(event, type), true);
   });
+})();
+
+// --- JOURNEY ANALYSIS INTERCEPTOR (Dynamic Robin Hood + Scraper) ---
+(function() {
+  // IMPORTANT: We use a different variable name here so we don't accidentally
+  // trip over the old script if it's still floating in memory!
+  if (window.__csDemoJourneyDynamicInstalled) return;
+  window.__csDemoJourneyDynamicInstalled = true;
+
+  console.log('🚀 [CS Demo] Journey API Interceptor Active (Dynamic Engine)');
+
+  const extractUrl = (args) => {
+    try {
+      if (typeof args[0] === 'string') return args[0];
+      if (args[0] instanceof Request) return args[0].url;
+      if (args[0] && args[0].url) return args[0].url;
+    } catch(e) {}
+    return '';
+  };
+
+  // ---------------------------------------------------------
+  // HELPER: GET RULES FROM STORAGE
+  // ---------------------------------------------------------
+  const getJourneyRules = () => {
+    try {
+      return JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
+    } catch(e) {
+      return [];
+    }
+  };
+
+  const getEffectiveName = (rule) => rule.renameTo ? rule.renameTo : rule.targetNode;
+
+  // ---------------------------------------------------------
+  // 1. RECURSIVE RENAME (Dynamic)
+  // ---------------------------------------------------------
+  const deepRename = (obj, rules) => {
+    if (!obj || !rules.length) return false;
+    let changed = false;
+    
+    if (Array.isArray(obj)) {
+      for (let i = 0; i < obj.length; i++) {
+        if (deepRename(obj[i], rules)) changed = true;
+      }
+    } else if (typeof obj === 'object') {
+      if (obj.name && typeof obj.name === 'string') {
+        const matchingRule = rules.find(r => r.targetNode.toLowerCase() === obj.name.toLowerCase());
+        if (matchingRule && matchingRule.renameTo) {
+          obj.name = matchingRule.renameTo;
+          changed = true;
+        }
+      }
+      for (const key in obj) {
+        if (typeof obj[key] === 'object' && deepRename(obj[key], rules)) changed = true;
+      }
+    }
+    return changed;
+  };
+
+  // ---------------------------------------------------------
+  // 2. FIX THE RIGHT PANEL (Dynamic)
+  // ---------------------------------------------------------
+  const fixRightPanel = (elementsArray, rules) => {
+    if (!Array.isArray(elementsArray) || !rules.length) return false;
+    let changed = false;
+    
+    elementsArray.forEach(el => {
+      rules.forEach(rule => {
+        const targetName = getEffectiveName(rule);
+        if (el.name === targetName || el.name === rule.targetNode) {
+          el.percent = (rule.percent / 100); 
+          changed = true;
+        }
+      });
+    });
+    return changed;
+  };
+
+  // ---------------------------------------------------------
+  // 3. FIX THE SUNBURST VISUAL (Dynamic Robin Hood)
+  // ---------------------------------------------------------
+  const stealSiblingTraffic = (node, rules) => {
+    if (!node || !node.children || !Array.isArray(node.children) || !rules.length) return false;
+    let changed = false;
+
+    rules.forEach(rule => {
+      const targetName = getEffectiveName(rule);
+      const targetIndex = node.children.findIndex(c => c.name === targetName || c.name === rule.targetNode);
+
+      if (targetIndex !== -1) {
+        const totalParentSize = node.size || 0;
+        let newTargetSize = Math.round(totalParentSize * (rule.percent / 100));
+        
+        let siblingSum = 0;
+        let exitPathSum = 0;
+
+        node.children.forEach((c, idx) => {
+          if (idx !== targetIndex) {
+            if (c.name && typeof c.name === 'string' && c.name.includes('END_')) {
+              exitPathSum += (c.size || 0);
+            } else {
+              siblingSum += (c.size || 0);
+            }
+          }
+        });
+
+        // Safety bound to prevent math overflow
+        if (newTargetSize + exitPathSum > totalParentSize) {
+           newTargetSize = totalParentSize - exitPathSum;
+           if (newTargetSize < 0) newTargetSize = 0;
+        }
+
+        const leftoverForSiblings = totalParentSize - newTargetSize - exitPathSum;
+
+        node.children.forEach((c, idx) => {
+          if (idx === targetIndex) {
+            c.size = newTargetSize;
+            if (c.paMetrics) c.paMetrics.sessionRetentionCount = newTargetSize;
+          } else if (c.name && typeof c.name === 'string' && c.name.includes('END_')) {
+            // Keep exits intact
+          } else {
+            const siblingShare = siblingSum === 0 ? 0 : ((c.size || 0) / siblingSum);
+            c.size = Math.round(leftoverForSiblings * siblingShare);
+            if (c.size < 0) c.size = 0; 
+            if (c.paMetrics) c.paMetrics.sessionRetentionCount = c.size;
+          }
+        });
+        changed = true;
+      }
+    });
+
+    // Drill down
+    node.children.forEach(child => {
+      if (stealSiblingTraffic(child, rules)) changed = true;
+    });
+
+    return changed;
+  };
+
+  // ---------------------------------------------------------
+  // 4. THE HARVESTER 
+  // ---------------------------------------------------------
+  const extractAllNodeNames = (tree, namesSet = new Set()) => {
+    if (!tree) return namesSet;
+    if (Array.isArray(tree)) {
+      tree.forEach(node => extractAllNodeNames(node, namesSet));
+    } else if (typeof tree === 'object') {
+      if (tree.name && typeof tree.name === 'string') {
+        if (!tree.name.includes('END_PATH') && tree.name !== 'root' && tree.name !== 'UNDEFINED_PATH') {
+          namesSet.add(tree.name);
+        }
+      }
+      if (tree.children) extractAllNodeNames(tree.children, namesSet);
+    }
+    return namesSet;
+  };
+
+  // ---------------------------------------------------------
+  // FETCH INTERCEPTOR
+  // ---------------------------------------------------------
+  const originalFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const url = extractUrl(args);
+    const response = await originalFetch.apply(this, args);
+
+    try {
+      if (url.includes('/pages') && url.includes('mappings')) {
+        const clone = response.clone();
+        const data = await clone.json();
+        const activeRules = getJourneyRules();
+        if (deepRename(data, activeRules)) {
+          return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+        }
+      }
+
+      if (url.includes('/navigation-path')) {
+        const clone = response.clone();
+        const data = await clone.json();
+        let changed = false;
+        const activeRules = getJourneyRules();
+
+        if (data && data.payload) {
+           if (data.payload.tree) {
+             const uniqueNames = Array.from(extractAllNodeNames(data.payload.tree));
+             window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, '*');
+           }
+
+           if (fixRightPanel(data.payload.elements, activeRules)) changed = true;
+           if (stealSiblingTraffic(data.payload.tree, activeRules)) changed = true;
+        }
+
+        if (changed) {
+          return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+        }
+      }
+    } catch (e) {}
+    return response;
+  };
+
+  // ---------------------------------------------------------
+  // XHR INTERCEPTOR
+  // ---------------------------------------------------------
+  const originalXhrOpen = XMLHttpRequest.prototype.open;
+  const originalXhrSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this._customDemoUrl = url;
+    return originalXhrOpen.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function() {
+    this.addEventListener('readystatechange', function() {
+      if (this.readyState === 4 && this._customDemoUrl) {
+        try {
+          if (this._customDemoUrl.includes('/pages') && this._customDemoUrl.includes('mappings')) {
+             const data = JSON.parse(this.responseText);
+             const activeRules = getJourneyRules();
+             if (deepRename(data, activeRules)) {
+                Object.defineProperty(this, 'responseText', { get: () => JSON.stringify(data) });
+                Object.defineProperty(this, 'response', { get: () => JSON.stringify(data) });
+             }
+          }
+          if (this._customDemoUrl.includes('/navigation-path')) {
+             const data = JSON.parse(this.responseText);
+             let changed = false;
+             const activeRules = getJourneyRules();
+
+             if (data && data.payload) {
+                if (data.payload.tree) {
+                   const uniqueNames = Array.from(extractAllNodeNames(data.payload.tree));
+                   window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, '*');
+                }
+
+                if (fixRightPanel(data.payload.elements, activeRules)) changed = true;
+                if (stealSiblingTraffic(data.payload.tree, activeRules)) changed = true;
+             }
+
+             if (changed) {
+                Object.defineProperty(this, 'responseText', { get: () => JSON.stringify(data) });
+                Object.defineProperty(this, 'response', { get: () => JSON.stringify(data) });
+             }
+          }
+        } catch(e) { } 
+      }
+    });
+    return originalXhrSend.apply(this, arguments);
+  };
 })();
