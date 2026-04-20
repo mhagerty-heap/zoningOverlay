@@ -5311,6 +5311,14 @@
       .pane-bounds { display: none; max-height: 140px; overflow: auto; border: 1px solid #eee; border-radius: 6px; padding: 6px; margin-bottom: 10px; }
       .pane-row { display: grid; grid-template-columns: minmax(0, 1fr) 56px 56px; gap: 6px; align-items: center; margin-bottom: 6px; }
       .pane-name { font-size: 10px; color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      
+      .help-icon { 
+        color: #5959dc; 
+        cursor: help; 
+        font-weight: bold; 
+        margin-left: 4px;
+      }
+
     `);
 
     shadow.adoptedStyleSheets = [sheet];
@@ -5344,13 +5352,18 @@
         ${editModeWarning}
         <div class="tab-content" style="${disabledOverlayStyle}">
           
-          <div class="section-label" style="color: #4a4a64;">Data Realism (Jitter)</div>
+          <div class="section-label" style="color: #4a4a64; display: flex; align-items: center;">
+            Data Realism (Jitter)
+            <span class="help-icon" title="Jitter adds human-like variance to the data. 0% creates a mathematically perfect, straight-line drop-off. 15-20% adds organic 'bumps' along the curve. 100% makes the data highly erratic while still generally trending downward.">[?]</span>
+          </div>
           <div style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
             <input type="range" id="inp-jitter" min="0" max="100" step="1" value="16" style="flex:1;" ${isEditing ? '' : 'disabled'}>
             <span id="txt-jitter" style="font-weight:bold; width:40px; text-align:right; color:#2c2c8c;">16%</span>
           </div>
           <div class="chk-row" style="margin-bottom: 12px;">
-            <label style="display:flex;align-items:center;cursor:pointer;"><input type="checkbox" id="chk-true-random" ${isEditing ? '' : 'disabled'}> True Randomness (Ignore gradient)</label>
+            <label style="display:flex;align-items:center;cursor:pointer;" title="Completely ignores the top-to-bottom scroll gradient and assigns wild, random values between your Min and Max to every single zone on the page.">
+              <input type="checkbox" id="chk-true-random" ${isEditing ? '' : 'disabled'}> True Randomness (Ignore gradient)
+            </label>
           </div>
 
           <div class="tab-nav">
@@ -5423,7 +5436,10 @@
       <div id="master-pane-journeys" class="master-pane ${journeysActiveStr}">
          ${editModeWarning}
          <div class="tab-content" style="${disabledOverlayStyle}">
-           <div class="section-label">Journey Node Editor</div>
+          <div class="section-label" style="display: flex; align-items: center;">
+            Journey Node Editor
+            <span class="help-icon" title="Allows you to rename and inflate the size of specific nodes in a Journey Analysis sunburst chart.">[?]</span>
+          </div>
            <div class="hint" style="margin-bottom: 12px;">Select a node from the current journey to rename and inflate.</div>
            
            <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Pane (Demonstration Mode):</label>
