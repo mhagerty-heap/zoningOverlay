@@ -4955,7 +4955,7 @@
     updateToolbar();
   };
 
-  async function applyBulkFillToCurrentMetric(maxVal, minVal, jitter = 0.16, trueRandom = false) {
+  async function applyBulkFillToCurrentMetric(maxVal, minVal, jitter = 0.16, trueRandom = false, overwriteAll = false) {
     isBulkGenerating = true;
     if (isTopFrame) {
       // 1. Force a fresh read immediately when the button is clicked
@@ -5014,13 +5014,14 @@
         numVal = parseFloat(curMetric.replace(/[^0-9.,-]/g, '').replace(',', '.'));
       }
 
-      // We want to fill everything that doesn't have an override yet, even if it has native data (> 0)
+      // NEW: Respect the overwrite toggle! Skip if native data exists and toggle is OFF.
+      if (!overwriteAll && Number.isFinite(numVal) && numVal > 0) return;
+
       const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
       const y = rect && Number.isFinite(rect.top) && Number.isFinite(rect.height)
         ? (rect.top + rect.height / 2)
         : Number.NaN;
       eligibleZones.push({ el, y, zoneId: el.getAttribute('id') || '', zoneKey: getZoneKey(el) || '' });
-
     });
 
     if (eligibleZones.length === 0) {
@@ -5118,7 +5119,7 @@
     return { applied, totalZones: zoneElements.length };
   }
 
-  async function generateAllClientMetrics(updatedRegistry, jitter = 0.16, trueRandom = false) {
+  async function generateAllClientMetrics(updatedRegistry, jitter = 0.16, trueRandom = false, overwriteAll = false) {  
     isBulkGenerating = true;
     
     if (updatedRegistry) {
@@ -5143,9 +5144,20 @@
     }
 
     // Group zones by pane so Left and Right get independent 360° Data distributions
-    // Group zones by pane so Left and Right get independent 360° Data distributions
     const panes = {};
     zones.forEach(el => {
+      const curValueAttr = el.getAttribute('value');
+      const curMetric = (el.getAttribute('metric') || '').trim();
+      let numVal = NaN;
+      if (curValueAttr !== null && curValueAttr.trim() !== '') {
+        numVal = parseFloat(curValueAttr);
+      } else {
+        numVal = parseFloat(curMetric.replace(/[^0-9.,-]/g, '').replace(',', '.'));
+      }
+
+      // NEW: Respect the overwrite toggle!
+      if (!overwriteAll && Number.isFinite(numVal) && numVal > 0) return;
+
       const pKey = getPaneKey(el) || 'default';
       if (!panes[pKey]) panes[pKey] = [];
       const rect = el.getBoundingClientRect();
@@ -5352,6 +5364,11 @@
               <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max (e.g. 15)" ${isEditing ? '' : 'disabled'}>
               <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min (e.g. 1)" ${isEditing ? '' : 'disabled'}>
             </div>
+            <div class="chk-row" style="margin-bottom: 12px;">
+              <label style="display:flex;align-items:center;cursor:pointer;">
+                <input type="checkbox" id="chk-bulk-overwrite" ${isEditing ? '' : 'disabled'}> Overwrite existing native data (>0)
+              </label>
+            </div>
             <button class="btn btn-apply" id="btn-bulk-fill" ${isEditing ? '' : 'disabled'}>Fill Zeros for Current Metric</button>
           </div>
 
@@ -5367,6 +5384,11 @@
                   <input class="tuner-inp metric-max" data-metric="${name}" type="number" value="${config.max}" ${isEditing ? '' : 'disabled'}>
                 </div>
               `).join('')}
+            </div>
+            <div class="chk-row" style="margin-bottom: 12px; margin-top: 8px;">
+              <label style="display:flex;align-items:center;cursor:pointer;">
+                <input type="checkbox" id="chk-nuclear-overwrite" ${isEditing ? '' : 'disabled'}> Overwrite existing native data (>0)
+              </label>
             </div>
             <button class="btn btn-apply" id="btn-nuclear-fill" style="background: #cc3333;" ${isEditing ? '' : 'disabled'}>🚀 Generate All Data</button>
           </div>
@@ -5637,6 +5659,7 @@
       const minVal = parseFloat(shadow.getElementById('inp-bulk-min')?.value || '0');
       const jitter = parseFloat(shadow.getElementById('inp-jitter')?.value || '16') / 100;
       const trueRandom = shadow.getElementById('chk-true-random')?.checked || false;
+      const overwriteAll = shadow.getElementById('chk-bulk-overwrite')?.checked || false;
 
       if (isNaN(maxVal) || isNaN(minVal) || maxVal < minVal) {
         alert('Please enter valid max and min values (max must be >= min).');
@@ -5646,11 +5669,11 @@
       if (isTopFrame) {
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
-          payload: { type: 'applyBulkFillInFrame', maxVal, minVal, jitter, trueRandom }
+          payload: { type: 'applyBulkFillInFrame', maxVal, minVal, jitter, trueRandom, overwriteAll }
         });
-        applyBulkFillToCurrentMetric(maxVal, minVal, jitter, trueRandom);
+        applyBulkFillToCurrentMetric(maxVal, minVal, jitter, trueRandom, overwriteAll);
       } else {
-        applyBulkFillToCurrentMetric(maxVal, minVal, jitter, trueRandom);
+        applyBulkFillToCurrentMetric(maxVal, minVal, jitter, trueRandom, overwriteAll);
       }
     });
 
@@ -5672,15 +5695,16 @@
 
       const jitter = parseFloat(shadow.getElementById('inp-jitter')?.value || '16') / 100;
       const trueRandom = shadow.getElementById('chk-true-random')?.checked || false;
+      const overwriteAll = shadow.getElementById('chk-nuclear-overwrite')?.checked || false;
 
       if (isTopFrame) {
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
-          payload: { type: 'generateAllInFrame', updatedRegistry, jitter, trueRandom }
+          payload: { type: 'generateAllInFrame', updatedRegistry, jitter, trueRandom, overwriteAll }
         });
-        generateAllClientMetrics(updatedRegistry, jitter, trueRandom);
+        generateAllClientMetrics(updatedRegistry, jitter, trueRandom, overwriteAll);
       } else {
-        generateAllClientMetrics(updatedRegistry, jitter, trueRandom);
+        generateAllClientMetrics(updatedRegistry, jitter, trueRandom, overwriteAll);
       }
     });
 
@@ -6636,7 +6660,7 @@
 
     if (msg.type === 'applyBulkFillInFrame') {
       // Allow all frames to participate, but we will stagger their saves
-      applyBulkFillToCurrentMetric(msg.maxVal, msg.minVal, msg.jitter, msg.trueRandom).then(result => {
+      applyBulkFillToCurrentMetric(msg.maxVal, msg.minVal, msg.jitter, msg.trueRandom, msg.overwriteAll).then(result => {
         sendResponse({ ok: true, frame: frameContextKey, ...result });
       });
       return true; // Keep channel open for async
@@ -6644,7 +6668,7 @@
 
     if (msg.type === 'generateAllInFrame') {
       // Everyone runs it simultaneously! Stagger is handled natively inside.
-      generateAllClientMetrics(msg.updatedRegistry, msg.jitter, msg.trueRandom).then(result => {
+      generateAllClientMetrics(msg.updatedRegistry, msg.jitter, msg.trueRandom, msg.overwriteAll).then(result => {
         sendResponse({ ok: true, frame: frameContextKey, ...result });
       });
       return true; 
