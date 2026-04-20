@@ -4885,13 +4885,11 @@
     
     zoneEls.forEach(el => {
       // 1. RESTORE ORIGINALS
-      // If we captured real data, put it back.
       if (el.hasAttribute('data-cs-demo-orig-metric')) {
         const origMetric = el.getAttribute('data-cs-demo-orig-metric');
         const origValue = el.getAttribute('data-cs-demo-orig-value');
         const origColor = el.getAttribute('data-cs-demo-orig-color');
 
-        // Only set attributes if they weren't empty strings to begin with
         if (origMetric) el.setAttribute('metric', origMetric);
         
         if (origValue !== null && origValue !== "null") {
@@ -4903,14 +4901,11 @@
         if (origColor && origColor !== "null") {
           el.setAttribute('color', origColor);
         } else {
-          // If there was no original color, let CSQ decide
           el.removeAttribute('color');
         }
       }
 
-      // 2. ONLY REMOVE OUR TRACKING MARKERS
-      // We STOP removing 'metric', 'value', and 'color' here 
-      // unless we specifically put them there ourselves.
+      // 2. REMOVE TRACKING MARKERS
       el.removeAttribute('data-cs-demo-orig-metric');
       el.removeAttribute('data-cs-demo-orig-value');
       el.removeAttribute('data-cs-demo-orig-color');
@@ -4921,16 +4916,15 @@
     // 3. INTERNAL CLEANUP
     overrides = {};
     heatmapPointOverrides = {};
+    // NEW: Nuke the Journey Rules from localStorage
+    localStorage.removeItem('csDemoJourneyRules');
 
     // 4. GENTLE RE-TRIGGER
-    // We don't hide/show anymore, just a resize event to tell CSQ to refresh
     window.dispatchEvent(new Event('resize'));
     
     zoneObservers.forEach(entry => entry.observer.disconnect());
     zoneObservers.clear();
     syncZoneWatchers();
-    
-    //console.log("[CS Debug] 🧼 Safe Reset: Restored originals and cleared markers.");
   };
 
   const resetAll = async (skipConfirm) => {
@@ -5405,22 +5399,29 @@
       </div>
 
       <div id="master-pane-journeys" class="master-pane ${journeysActiveStr}">
-         <div class="tab-content">
+         ${editModeWarning}
+         <div class="tab-content" style="${disabledOverlayStyle}">
            <div class="section-label">Journey Node Editor</div>
            <div class="hint" style="margin-bottom: 12px;">Select a node from the current journey to rename and inflate.</div>
            
+           <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Pane (Demonstration Mode):</label>
+           <div id="journey-pane-selector" style="display: flex; gap: 4px; margin-bottom: 12px;">
+             <button id="btn-journey-pane-left" class="btn btn-pane-selector active" data-pane="left" style="flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Left Pane</button>
+             <button id="btn-journey-pane-right" class="btn btn-pane-selector" data-pane="right" style="flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Right Pane</button>
+           </div>
+           
            <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Node:</label>
-           <select id="journey-target-node" class="inp" style="width: 100%; margin-bottom: 12px;">
+           <select id="journey-target-node" class="inp" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
              <option value="" disabled selected>Waiting for data...</option>
            </select>
 
            <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Rename To (Optional):</label>
-           <input type="text" id="journey-rename-to" class="inp" placeholder="e.g., The Golden Path" style="width: 100%; margin-bottom: 12px;">
+           <input type="text" id="journey-rename-to" class="inp" placeholder="e.g., The Golden Path" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
 
            <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Percentage (%):</label>
-           <input type="number" id="journey-target-percent" class="inp" placeholder="e.g., 85" min="1" max="100" style="width: 100%; margin-bottom: 15px;">
+           <input type="number" id="journey-target-percent" class="inp" placeholder="e.g., 85" min="1" max="100" style="width: 100%; margin-bottom: 15px;" ${isEditing ? '' : 'disabled'}>
 
-           <button id="btn-add-journey-rule" class="btn btn-apply" style="width: 100%;">Add Journey Rule</button>
+           <button id="btn-add-journey-rule" class="btn btn-apply" style="width: 100%;" ${isEditing ? '' : 'disabled'}>Add Journey Rule</button>
          </div>         
       </div>
     `;
@@ -5463,32 +5464,54 @@
       });
     };
 
-    // 2. Add Rule Listener
+    // --- NEW: PANE-AWARE JOURNEY LOGIC ---
+    let selectedJourneyPane = 'left';
+
+    // 1. Hook up those buttons with Edit-Mode check
+    shadow.querySelectorAll('.btn-pane-selector').forEach(btn => {
+      btn.addEventListener('click', () => {
+        // BAIL if editing is OFF
+        if (!editMode) return;
+
+        shadow.querySelectorAll('.btn-pane-selector').forEach(b => {
+          b.classList.remove('active');
+          b.style.cssText = "flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
+        });
+        btn.classList.add('active');
+        btn.style.cssText = "flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
+        selectedJourneyPane = btn.dataset.pane;
+      });
+    });
+
+    // 2. Updated Add Rule Listener to capture the Pane
     shadow.getElementById('btn-add-journey-rule')?.addEventListener('click', () => {
-      const targetNode = shadow.getElementById('journey-target-node').value;
-      const renameTo = shadow.getElementById('journey-rename-to').value.trim();
+      const targetNodeRaw = shadow.getElementById('journey-target-node').value;
+      const renameToRaw = shadow.getElementById('journey-rename-to').value.trim();
       const percentRaw = shadow.getElementById('journey-target-percent').value;
       
-      if (!targetNode) return alert('Please select a target node from the dropdown.');
-      if (!percentRaw || isNaN(percentRaw) || percentRaw <= 0 || percentRaw > 100) return alert('Please enter a valid percentage (1-100).');
+      if (!targetNodeRaw) return alert('Please select a target node.');
+      if (!percentRaw || isNaN(percentRaw)) return alert('Please enter a percentage.');
 
       const rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
-      // Remove existing rule for this node if it exists
-      const filteredRules = rules.filter(r => r.targetNode !== targetNode);
+      
+      // Filter out existing rule for same node on same side
+      const filteredRules = rules.filter(r => !(r.originalName === targetNodeRaw && r.paneSide === selectedJourneyPane));
       
       filteredRules.push({
-        targetNode,
-        renameTo,
-        percent: parseFloat(percentRaw)
+        originalName: targetNodeRaw,           
+        renameTo: renameToRaw || targetNodeRaw,  
+        percent: parseFloat(percentRaw),
+        paneSide: selectedJourneyPane,          
+        createdAt: Date.now()
       });
 
       localStorage.setItem('csDemoJourneyRules', JSON.stringify(filteredRules));
       
-      // Clear inputs
       shadow.getElementById('journey-rename-to').value = '';
       shadow.getElementById('journey-target-percent').value = '';
+      if (typeof updateToolbar === 'function') updateToolbar();
       
-      
+      alert(`Journey Rule Added for ${selectedJourneyPane.toUpperCase()} PANE! Perform a Soft Reload (change date) to see changes.`);
     });
 
     
@@ -5842,8 +5865,17 @@
           <div class="list">
             ${journeyRules.length === 0 ? '<div class="empty">No journey rules</div>' : journeyRules.map((r, i) => `
                 <div class="item">
-                  <span class="name" title="${escHtml(r.targetNode)}">${escHtml(r.renameTo || r.targetNode)}</span>
-                  <span class="meta">Target: ${r.percent}%</span>
+                  <div style="flex: 1; display: flex; flex-direction: column;">
+                    <span class="name" style="width: auto;">
+                      <span style="color: #888; font-weight: normal;">${escHtml(r.originalName || r.targetNode)}</span>
+                      <span style="color: #5959dc; margin: 0 6px;">→</span> 
+                      <span style="font-weight: 700;">${escHtml(r.renameTo)}</span>
+                    </span>
+                    <span class="meta">
+                      Target: ${r.percent}% 
+                      <b style="color: #2c2c8c; margin-left: 8px;">[${(r.paneSide || 'left').toUpperCase()} PANE]</b>
+                    </span>
+                  </div>
                   <button class="btn-del" data-kind="journey" data-index="${i}">Delete</button>
                 </div>
               `).join('')}
@@ -6294,6 +6326,90 @@
       }
     };
     setTimeout(() => document.addEventListener('click', closeOnOutside, true), 0);
+  }
+
+  // --- VISUAL JOURNEY SWEEPER (OPTIMIZED PIERCER) ---
+  let journeySweeperInterval = null;
+
+  function startJourneySweeper() {
+    if (journeySweeperInterval) clearInterval(journeySweeperInterval);
+    
+    console.log("🚀 [CS Demo] Visual Journey Sweeper Initialized (Optimized)!");
+    
+    journeySweeperInterval = setInterval(() => {
+      if (!masterEnabled || !window.location.href.includes('/navigation-path')) return;
+      
+      const rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
+      if (!rules.length) return;
+
+      const center = window.innerWidth / 2;
+
+      // Highly optimized shadow-piercing text collector
+      function collectTextNodes(node, textNodes = []) {
+        if (!node) return textNodes;
+        
+        // Skip heavy, irrelevant nodes to save CPU
+        if (node.nodeType === Node.ELEMENT_NODE) {
+            const tag = node.tagName.toUpperCase();
+            if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'PATH') return textNodes;
+        }
+
+        if (node.nodeType === Node.TEXT_NODE) {
+            textNodes.push(node);
+        } else {
+            if (node.shadowRoot) collectTextNodes(node.shadowRoot, textNodes);
+            if (node.childNodes && node.childNodes.length > 0) {
+               node.childNodes.forEach(child => collectTextNodes(child, textNodes));
+            }
+        }
+        return textNodes;
+      }
+
+      // Walk up the tree to find a physical screen location if the node is 0x0
+      function getPhysicalRect(el) {
+          let current = el;
+          while(current && current !== document.body) {
+              if (current.getBoundingClientRect) {
+                  const r = current.getBoundingClientRect();
+                  if (r.width > 0 && r.height > 0) return r;
+              }
+              // Move up to parent, or pierce UP out of a shadow DOM
+              current = current.parentElement || (current.getRootNode && current.getRootNode().host);
+          }
+          return {left: 0, width: 0};
+      }
+
+      const allTextNodes = collectTextNodes(document.body);
+
+      allTextNodes.forEach(textNode => {
+        const val = textNode.nodeValue;
+        if (!val || val.trim() === '') return;
+
+        rules.forEach(rule => {
+          const orig = rule.originalName || rule.targetNode;
+          const rename = rule.renameTo;
+          
+          if (!orig || !rename || orig === rename) return;
+
+          if (val.includes(orig) && !val.includes(rename)) {
+            const parent = textNode.parentElement;
+            if (!parent) return;
+
+            // Find the actual physical location of the text, even if nested in 0x0 wrappers
+            const rect = getPhysicalRect(parent);
+            
+            if (rect.width === 0) return; // Completely off-screen or detached
+
+            const isLeft = (rect.left + rect.width / 2) < center;
+            const screenSide = isLeft ? 'left' : 'right';
+            
+            if ((isLeft && rule.paneSide === 'left') || (!isLeft && rule.paneSide === 'right')) {
+              textNode.nodeValue = val.replace(orig, rename);
+            }
+          }
+        });
+      });
+    }, 100); // 400ms is the sweet spot: catches tooltips, saves the CPU
   }
 
   // --- SPA NAVIGATION POLLER ---
@@ -7406,6 +7522,7 @@
     // 4. AGGRESSIVE PERSISTENCE POLLING
     // Checks for zones every 500ms for 20 seconds during initial load or refresh
     startAggressiveZonePolling();
+    startJourneySweeper();
 
     // 5. Initialize UI and Handlers
     syncZoneWatchers();

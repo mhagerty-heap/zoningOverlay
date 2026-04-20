@@ -18,21 +18,17 @@
       if (node.nodeType === 1 && node.matches && node.matches(selector)) {
         return node;
       }
-
       if (node.parentElement) {
         node = node.parentElement;
         continue;
       }
-
       const root = node.getRootNode ? node.getRootNode() : null;
       if (root && root.host) {
         node = root.host;
         continue;
       }
-
       break;
     }
-
     return null;
   }
 
@@ -91,17 +87,12 @@
       if (seenNativeEvents.has(event)) return;
       seenNativeEvents.add(event);
     }
-
-    if (state.uiVisible === false) {
-      return;
-    }
+    if (state.uiVisible === false) return;
 
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
     const heatmapLayer = findHeatmapLayerFromPath(path);
 
-    if (!state.editMode && !heatmapLayer) {
-      return;
-    }
+    if (!state.editMode && !heatmapLayer) return;
 
     const detail = {
       source,
@@ -129,14 +120,12 @@
   });
 })();
 
-// --- JOURNEY ANALYSIS INTERCEPTOR (Dynamic Robin Hood + Scraper) ---
+// --- JOURNEY ANALYSIS INTERCEPTOR (Math Only) ---
 (function() {
-  // IMPORTANT: We use a different variable name here so we don't accidentally
-  // trip over the old script if it's still floating in memory!
   if (window.__csDemoJourneyDynamicInstalled) return;
   window.__csDemoJourneyDynamicInstalled = true;
 
-  console.log('🚀 [CS Demo] Journey API Interceptor Active (Dynamic Engine)');
+  console.log('🚀 [CS Demo] Journey API Interceptor Active (Math Engine Only)');
 
   const extractUrl = (args) => {
     try {
@@ -147,9 +136,6 @@
     return '';
   };
 
-  // ---------------------------------------------------------
-  // HELPER: GET RULES FROM STORAGE
-  // ---------------------------------------------------------
   const getJourneyRules = () => {
     try {
       return JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
@@ -158,36 +144,38 @@
     }
   };
 
-  const getEffectiveName = (rule) => rule.renameTo ? rule.renameTo : rule.targetNode;
+  // --- TEMPORAL ALTERNATOR (For Chart Sizes Only) ---
+  let navReqCount = 0;
+  let lastReqTime = 0;
 
-  // ---------------------------------------------------------
-  // 1. RECURSIVE RENAME (Dynamic)
-  // ---------------------------------------------------------
-  const deepRename = (obj, rules) => {
-    if (!obj || !rules.length) return false;
-    let changed = false;
-    
-    if (Array.isArray(obj)) {
-      for (let i = 0; i < obj.length; i++) {
-        if (deepRename(obj[i], rules)) changed = true;
-      }
-    } else if (typeof obj === 'object') {
-      if (obj.name && typeof obj.name === 'string') {
-        const matchingRule = rules.find(r => r.targetNode.toLowerCase() === obj.name.toLowerCase());
-        if (matchingRule && matchingRule.renameTo) {
-          obj.name = matchingRule.renameTo;
-          changed = true;
-        }
-      }
-      for (const key in obj) {
-        if (typeof obj[key] === 'object' && deepRename(obj[key], rules)) changed = true;
-      }
+  function getJourneyRequestSide(url, bodyStr) {
+    if (bodyStr) {
+      if (bodyStr.includes('"compareIndex":1')) return 'right';
+      if (bodyStr.includes('"compareIndex":0')) return 'left';
     }
-    return changed;
-  };
+
+    const now = Date.now();
+    const timeSinceLast = now - lastReqTime;
+
+    if (timeSinceLast > 2500) {
+      console.log(`🕵️ [CS Demo Math] Alternator Timer Reset! (Time since last request: ${timeSinceLast}ms)`);
+      navReqCount = 0;
+    }
+    lastReqTime = now;
+
+    if (url.includes('/navigation-path') && !url.includes('/mappings')) {
+      navReqCount++;
+      const side = (navReqCount % 2 === 0) ? 'right' : 'left';
+      console.log(`🕵️ [CS Demo Math] Chart Request #${navReqCount} fired -> Assigned to ${side.toUpperCase()} PANE.`);
+      return side;
+    }
+    return 'left';
+  }
+
+  const getEffectiveName = (rule) => rule.renameTo ? rule.renameTo : (rule.originalName || rule.targetNode);
 
   // ---------------------------------------------------------
-  // 2. FIX THE RIGHT PANEL (Dynamic)
+  // 1. FIX THE RIGHT PANEL (Sizes Only)
   // ---------------------------------------------------------
   const fixRightPanel = (elementsArray, rules) => {
     if (!Array.isArray(elementsArray) || !rules.length) return false;
@@ -195,8 +183,11 @@
     
     elementsArray.forEach(el => {
       rules.forEach(rule => {
-        const targetName = getEffectiveName(rule);
-        if (el.name === targetName || el.name === rule.targetNode) {
+        const targetName = String(getEffectiveName(rule)).toLowerCase();
+        const original = String(rule.originalName || rule.targetNode || '').toLowerCase();
+        const elName = String(el.name || '').toLowerCase();
+        
+        if (elName === targetName || elName === original) {
           el.percent = (rule.percent / 100); 
           changed = true;
         }
@@ -206,15 +197,20 @@
   };
 
   // ---------------------------------------------------------
-  // 3. FIX THE SUNBURST VISUAL (Dynamic Robin Hood)
+  // 2. FIX THE SUNBURST VISUAL (Sizes Only)
   // ---------------------------------------------------------
   const stealSiblingTraffic = (node, rules) => {
     if (!node || !node.children || !Array.isArray(node.children) || !rules.length) return false;
     let changed = false;
 
     rules.forEach(rule => {
-      const targetName = getEffectiveName(rule);
-      const targetIndex = node.children.findIndex(c => c.name === targetName || c.name === rule.targetNode);
+      const targetName = String(getEffectiveName(rule)).toLowerCase();
+      const original = String(rule.originalName || rule.targetNode || '').toLowerCase();
+      
+      const targetIndex = node.children.findIndex(c => {
+         const cName = String(c.name || '').toLowerCase();
+         return cName === targetName || cName === original;
+      });
 
       if (targetIndex !== -1) {
         const totalParentSize = node.size || 0;
@@ -233,7 +229,6 @@
           }
         });
 
-        // Safety bound to prevent math overflow
         if (newTargetSize + exitPathSum > totalParentSize) {
            newTargetSize = totalParentSize - exitPathSum;
            if (newTargetSize < 0) newTargetSize = 0;
@@ -258,7 +253,6 @@
       }
     });
 
-    // Drill down
     node.children.forEach(child => {
       if (stealSiblingTraffic(child, rules)) changed = true;
     });
@@ -267,7 +261,7 @@
   };
 
   // ---------------------------------------------------------
-  // 4. THE HARVESTER 
+  // 3. THE HARVESTER 
   // ---------------------------------------------------------
   const extractAllNodeNames = (tree, namesSet = new Set()) => {
     if (!tree) return namesSet;
@@ -289,36 +283,42 @@
   // ---------------------------------------------------------
   const originalFetch = window.fetch;
   window.fetch = async function(...args) {
-    const url = extractUrl(args);
+    const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : '');
+    const method = (args[1] && args[1].method) ? args[1].method.toUpperCase() : 'GET';
+    
+    if (method === 'OPTIONS') return originalFetch.apply(this, args);
+
+    let requestBody = '';
+    try {
+       if (args[1] && args[1].body && typeof args[1].body === 'string') {
+           requestBody = args[1].body;
+       }
+    } catch(e) {}
+
+    const requestSide = getJourneyRequestSide(url, requestBody);
     const response = await originalFetch.apply(this, args);
 
     try {
-      if (url.includes('/pages') && url.includes('mappings')) {
-        const clone = response.clone();
-        const data = await clone.json();
-        const activeRules = getJourneyRules();
-        if (deepRename(data, activeRules)) {
-          return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
-        }
-      }
+      const allRules = getJourneyRules();
+      const sideSpecificRules = allRules.filter(r => (r.paneSide || 'left') === requestSide);
 
-      if (url.includes('/navigation-path')) {
+      // ONLY INTERCEPT SIZES, IGNORE MAPPINGS ENTIRELY
+      if (url.includes('/navigation-path') && !url.includes('/mappings')) {
         const clone = response.clone();
         const data = await clone.json();
         let changed = false;
-        const activeRules = getJourneyRules();
 
         if (data && data.payload) {
            if (data.payload.tree) {
              const uniqueNames = Array.from(extractAllNodeNames(data.payload.tree));
              window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, '*');
            }
-
-           if (fixRightPanel(data.payload.elements, activeRules)) changed = true;
-           if (stealSiblingTraffic(data.payload.tree, activeRules)) changed = true;
+           if (fixRightPanel(data.payload.elements, sideSpecificRules)) changed = true;
+           if (stealSiblingTraffic(data.payload.tree, sideSpecificRules)) changed = true;
         }
 
         if (changed) {
+          console.log(`✅ [CS Demo Math] SUCCESS: Applied ${sideSpecificRules.length} rule(s) to the ${requestSide.toUpperCase()} chart payload!`);
           return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
         }
       }
@@ -334,37 +334,40 @@
 
   XMLHttpRequest.prototype.open = function(method, url) {
     this._customDemoUrl = url;
+    this._customDemoMethod = method.toUpperCase();
     return originalXhrOpen.apply(this, arguments);
   };
 
-  XMLHttpRequest.prototype.send = function() {
+  XMLHttpRequest.prototype.send = function(body) {
+    if (this._customDemoMethod === 'OPTIONS') return originalXhrSend.apply(this, arguments);
+
+    this._customDemoBody = typeof body === 'string' ? body : '';
+    this._customDemoRequestSide = getJourneyRequestSide(this._customDemoUrl, this._customDemoBody);
+    
     this.addEventListener('readystatechange', function() {
       if (this.readyState === 4 && this._customDemoUrl) {
         try {
-          if (this._customDemoUrl.includes('/pages') && this._customDemoUrl.includes('mappings')) {
-             const data = JSON.parse(this.responseText);
-             const activeRules = getJourneyRules();
-             if (deepRename(data, activeRules)) {
-                Object.defineProperty(this, 'responseText', { get: () => JSON.stringify(data) });
-                Object.defineProperty(this, 'response', { get: () => JSON.stringify(data) });
-             }
-          }
-          if (this._customDemoUrl.includes('/navigation-path')) {
+          const requestSide = this._customDemoRequestSide;
+          const allRules = getJourneyRules();
+          const sideSpecificRules = allRules.filter(r => (r.paneSide || 'left') === requestSide);
+
+          // ONLY INTERCEPT SIZES, IGNORE MAPPINGS ENTIRELY
+          if (this._customDemoUrl.includes('/navigation-path') && !this._customDemoUrl.includes('/mappings')) {
              const data = JSON.parse(this.responseText);
              let changed = false;
-             const activeRules = getJourneyRules();
 
              if (data && data.payload) {
                 if (data.payload.tree) {
                    const uniqueNames = Array.from(extractAllNodeNames(data.payload.tree));
                    window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, '*');
                 }
-
-                if (fixRightPanel(data.payload.elements, activeRules)) changed = true;
-                if (stealSiblingTraffic(data.payload.tree, activeRules)) changed = true;
+                
+                if (fixRightPanel(data.payload.elements, sideSpecificRules)) changed = true;
+                if (stealSiblingTraffic(data.payload.tree, sideSpecificRules)) changed = true;
              }
 
              if (changed) {
+                console.log(`%c✨ Applied Math to ${requestSide.toUpperCase()} Chart`, 'color: #2c2c8c; font-weight: bold;');
                 Object.defineProperty(this, 'responseText', { get: () => JSON.stringify(data) });
                 Object.defineProperty(this, 'response', { get: () => JSON.stringify(data) });
              }
