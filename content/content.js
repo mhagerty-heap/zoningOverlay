@@ -5441,12 +5441,14 @@
             <span class="help-icon" title="Allows you to rename and inflate the size of specific nodes in a Journey Analysis sunburst chart.">[?]</span>
           </div>
            <div class="hint" style="margin-bottom: 12px;">Select a node from the current journey to rename and inflate.</div>
-           
-           <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Pane (Demonstration Mode):</label>
-           <div id="journey-pane-selector" style="display: flex; gap: 4px; margin-bottom: 12px;">
-             <button id="btn-journey-pane-left" class="btn btn-pane-selector active" data-pane="left" style="flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Left Pane</button>
-             <button id="btn-journey-pane-right" class="btn btn-pane-selector" data-pane="right" style="flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Right Pane</button>
-           </div>
+
+            <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Mode:</label>
+            <div id="journey-pane-selector" style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-bottom: 12px;">
+              <button id="btn-journey-pane-single" class="btn btn-pane-selector active" data-pane="all" style="grid-column: span 2; padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Non-Compare</button>
+              <button id="btn-journey-pane-left" class="btn btn-pane-selector" data-pane="left" style="padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Compare Left</button>
+              <button id="btn-journey-pane-right" class="btn btn-pane-selector" data-pane="right" style="padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Compare Right</button>
+              <button id="btn-journey-pane-both" class="btn btn-pane-selector" data-pane="both" style="grid-column: span 2; padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Compare Both</button>
+            </div>           
            
            <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Node:</label>
            <select id="journey-target-node" class="inp" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
@@ -5481,15 +5483,32 @@
         return;
       }
       
-      listContainer.innerHTML = rules.map((r, i) => `
+      listContainer.innerHTML = rules.map((r, i) => {
+        const origName = r.originalName || r.targetNode;
+        const newName = r.renameTo || origName;
+        const hasRename = r.renameTo && r.renameTo !== origName;
+        const paneMode = r.paneSide === 'left' ? 'COMPARE LEFT' :
+                         r.paneSide === 'right' ? 'COMPARE RIGHT' : 
+                         'NON-COMPARE';
+        return `
         <div style="display:flex; justify-content:space-between; align-items:center; background:#fff; border:1px solid #e0e0f0; padding:6px 10px; border-radius:6px; margin-bottom:6px;">
-          <div style="overflow:hidden;">
-            <div style="font-weight:600; font-size:11px; white-space:nowrap; text-overflow:ellipsis;">${escHtml(r.renameTo || r.targetNode)}</div>
-            <div style="font-size:10px; color:#888;">Target: ${r.targetNode} (${r.percent}%)</div>
+          <div style="overflow:hidden; flex:1; padding-right:10px;">
+            <div style="font-weight:600; font-size:11px; white-space:nowrap; text-overflow:ellipsis; margin-bottom:2px;">
+              ${hasRename 
+                ? `<span style="color: #888; font-weight: normal;">${escHtml(origName)}</span>
+                   <span style="color: #5959dc; margin: 0 4px;">→</span> 
+                   <span style="font-weight: 700;">${escHtml(newName)}</span>`
+                : `<span style="font-weight: 700;">${escHtml(origName)}</span>`
+              }
+            </div>
+            <div style="font-size:10px; color:#888;">
+              Target: ${r.percent}% <b style="color: #2c2c8c; margin-left: 6px;">[${paneMode}]</b>
+            </div>
           </div>
-          <button class="btn-del-journey-rule" data-index="${i}" style="background:#fff0f0; color:#cc3333; border:1px solid #ffcccc; border-radius:4px; font-size:10px; padding:3px 6px; cursor:pointer;">✕</button>
+          <button class="btn-del-journey-rule" data-index="${i}" style="background:#fff0f0; color:#cc3333; border:1px solid #ffcccc; border-radius:4px; font-size:10px; padding:3px 6px; cursor:pointer; flex-shrink:0;">✕</button>
         </div>
-      `).join('');
+        `;
+      }).join('');
 
       // Delete Rule Listeners
       shadow.querySelectorAll('.btn-del-journey-rule').forEach(btn => {
@@ -5503,8 +5522,9 @@
     };
 
     // --- NEW: PANE-AWARE JOURNEY LOGIC ---
-    let selectedJourneyPane = 'left';
+    let selectedJourneyPane = 'all';
 
+    // 1. Hook up those buttons with Edit-Mode check
     // 1. Hook up those buttons with Edit-Mode check
     shadow.querySelectorAll('.btn-pane-selector').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -5513,44 +5533,51 @@
 
         shadow.querySelectorAll('.btn-pane-selector').forEach(b => {
           b.classList.remove('active');
-          b.style.cssText = "flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
+          // Reset all buttons to the "inactive" gray style
+          b.style.cssText = "flex: 1; padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
         });
+        
         btn.classList.add('active');
-        btn.style.cssText = "flex: 1; padding: 6px 12px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
-        selectedJourneyPane = btn.dataset.pane;
+        // Set the clicked button to the "active" purple style
+        btn.style.cssText = "flex: 1; padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
+        
+        selectedJourneyPane = btn.dataset.pane; // This will now correctly set 'all', 'left', or 'right'
       });
     });
 
     // 2. Updated Add Rule Listener to capture the Pane
     shadow.getElementById('btn-add-journey-rule')?.addEventListener('click', () => {
-      const targetNodeRaw = shadow.getElementById('journey-target-node').value;
-      const renameToRaw = shadow.getElementById('journey-rename-to').value.trim();
-      const percentRaw = shadow.getElementById('journey-target-percent').value;
-      
-      if (!targetNodeRaw) return alert('Please select a target node.');
-      if (!percentRaw || isNaN(percentRaw)) return alert('Please enter a percentage.');
+    const targetNodeRaw = shadow.getElementById('journey-target-node').value;
+    const renameToRaw = shadow.getElementById('journey-rename-to').value.trim();
+    const percentRaw = shadow.getElementById('journey-target-percent').value;
 
-      const rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
-      
-      // Filter out existing rule for same node on same side
-      const filteredRules = rules.filter(r => !(r.originalName === targetNodeRaw && r.paneSide === selectedJourneyPane));
-      
-      filteredRules.push({
-        originalName: targetNodeRaw,           
-        renameTo: renameToRaw || targetNodeRaw,  
-        percent: parseFloat(percentRaw),
-        paneSide: selectedJourneyPane,          
-        createdAt: Date.now()
-      });
+    if (!targetNodeRaw || !percentRaw) return alert('Please select a node and percentage.');
 
-      localStorage.setItem('csDemoJourneyRules', JSON.stringify(filteredRules));
-      
-      shadow.getElementById('journey-rename-to').value = '';
-      shadow.getElementById('journey-target-percent').value = '';
-      if (typeof updateToolbar === 'function') updateToolbar();
-      
-      alert(`Journey Rule Added for ${selectedJourneyPane.toUpperCase()} PANE! Perform a Soft Reload (change date) to see changes.`);
-    });
+    let rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
+    const newRuleTemplate = {
+      originalName: targetNodeRaw,           
+      renameTo: renameToRaw || targetNodeRaw,  
+      percent: parseFloat(percentRaw),
+      createdAt: Date.now()
+    };
+
+    if (selectedJourneyPane === 'both') {
+      // Create two separate, isolated rules for Compare mode
+      rules = rules.filter(r => !(r.originalName === targetNodeRaw && (r.paneSide === 'left' || r.paneSide === 'right')));
+      rules.push({ ...newRuleTemplate, paneSide: 'left' });
+      rules.push({ ...newRuleTemplate, paneSide: 'right' });
+    } else {
+      // Update the specific mode (all, left, or right)
+      rules = rules.filter(r => !(r.originalName === targetNodeRaw && r.paneSide === selectedJourneyPane));
+      rules.push({ ...newRuleTemplate, paneSide: selectedJourneyPane });
+    }
+
+    localStorage.setItem('csDemoJourneyRules', JSON.stringify(rules));
+    shadow.getElementById('journey-rename-to').value = '';
+    shadow.getElementById('journey-target-percent').value = '';
+    if (typeof updateToolbar === 'function') updateToolbar();
+    alert(`Rule(s) applied to ${selectedJourneyPane.toUpperCase()} mode.`);
+  });
 
     
 
@@ -5901,24 +5928,35 @@
 
           <hr class="section-divider">
 
-          <div class="section-label">Journeys (${journeyRules.length})</div>
+         <div class="section-label">Journeys (${journeyRules.length})</div>
           <div class="list">
-            ${journeyRules.length === 0 ? '<div class="empty">No journey rules</div>' : journeyRules.map((r, i) => `
+            ${journeyRules.length === 0 ? '<div class="empty">No journey rules</div>' : journeyRules.map((r, i) => {
+                const origName = r.originalName || r.targetNode;
+                const newName = r.renameTo || origName;
+                const hasRename = r.renameTo && r.renameTo !== origName;
+                const paneMode = r.paneSide === 'left' ? 'COMPARE LEFT' :
+                                 r.paneSide === 'right' ? 'COMPARE RIGHT' : 
+                                 'NON-COMPARE';
+                return `
                 <div class="item">
                   <div style="flex: 1; display: flex; flex-direction: column;">
                     <span class="name" style="width: auto;">
-                      <span style="color: #888; font-weight: normal;">${escHtml(r.originalName || r.targetNode)}</span>
-                      <span style="color: #5959dc; margin: 0 6px;">→</span> 
-                      <span style="font-weight: 700;">${escHtml(r.renameTo)}</span>
+                      ${hasRename 
+                        ? `<span style="color: #888; font-weight: normal;">${escHtml(origName)}</span>
+                           <span style="color: #5959dc; margin: 0 6px;">→</span> 
+                           <span style="font-weight: 700;">${escHtml(newName)}</span>`
+                        : `<span style="font-weight: 700;">${escHtml(origName)}</span>`
+                      }
                     </span>
                     <span class="meta">
                       Target: ${r.percent}% 
-                      <b style="color: #2c2c8c; margin-left: 8px;">[${(r.paneSide || 'left').toUpperCase()} PANE]</b>
+                      <b style="color: #2c2c8c; margin-left: 8px;">[${paneMode}]</b>
                     </span>
                   </div>
                   <button class="btn-del" data-kind="journey" data-index="${i}">Delete</button>
                 </div>
-              `).join('')}
+                `;
+              }).join('')}
           </div>
 
           <hr class="section-divider">
@@ -6392,6 +6430,9 @@
         if (node.nodeType === Node.ELEMENT_NODE) {
             const tag = node.tagName.toUpperCase();
             if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'NOSCRIPT' || tag === 'PATH') return textNodes;
+            
+            // 🛡️ THE SHIELD: Do not let the sweeper cannibalize our own extension UI!
+            if (node.id && typeof node.id === 'string' && node.id.startsWith('cs-demo-')) return textNodes;
         }
 
         if (node.nodeType === Node.TEXT_NODE) {
@@ -6443,9 +6484,41 @@
             const isLeft = (rect.left + rect.width / 2) < center;
             const screenSide = isLeft ? 'left' : 'right';
             
-            if ((isLeft && rule.paneSide === 'left') || (!isLeft && rule.paneSide === 'right')) {
-              textNode.nodeValue = val.replace(orig, rename);
+            // 1. SHADOW-PIERCING DOM CHECK: Find the <csm-button> 
+            let isCompareView = false;
+            const checkCompareState = (root) => {
+              if (isCompareView || !root) return;
+              if (root.querySelector && root.querySelector('[data-qa-id="ja-compare-cancel-button"]')) {
+                isCompareView = true;
+                return;
+              }
+              if (root.querySelectorAll) {
+                root.querySelectorAll('*').forEach(el => {
+                  if (el.shadowRoot) checkCompareState(el.shadowRoot);
+                });
+              }
+            };
+            checkCompareState(document);
+            
+            // 2. SURGICAL GATEKEEPER:
+            // This prevents "Non-Compare" rules from firing in "Compare View" and vice-versa.
+            if (isCompareView) {
+              // If we are in COMPARE mode, ONLY allow 'left' or 'right' rules. 
+              // This strictly blocks 'all' (Non-Compare) rules from leaking.
+              if (rule.paneSide === 'left' && isLeft) {
+                textNode.nodeValue = val.replace(orig, rename);
+              } else if (rule.paneSide === 'right' && !isLeft) {
+                textNode.nodeValue = val.replace(orig, rename);
+              }
+            } else {
+              // If we are NOT in Compare mode, ONLY allow 'all' rules.
+              if (rule.paneSide === 'all') {
+                textNode.nodeValue = val.replace(orig, rename);
+              }
             }
+
+
+
           }
         });
       });

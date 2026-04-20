@@ -174,6 +174,36 @@
 
   const getEffectiveName = (rule) => rule.renameTo ? rule.renameTo : (rule.originalName || rule.targetNode);
 
+  // NEW: Helper to detect if the current request is part of a comparison
+  const isCompareRequest = (url, body) => {
+    try {
+      // 1. SHADOW-PIERCING DOM CHECK (Looks for the exact <csm-button> element)
+      let isCompView = false;
+      const checkCompareState = (root) => {
+        if (isCompView || !root) return;
+        if (root.querySelector && root.querySelector('[data-qa-id="ja-compare-cancel-button"]')) {
+          isCompView = true;
+          return;
+        }
+        if (root.querySelectorAll) {
+          root.querySelectorAll('*').forEach(el => {
+            if (el.shadowRoot) checkCompareState(el.shadowRoot);
+          });
+        }
+      };
+      checkCompareState(document);
+      if (isCompView) return true;
+
+      // 2. NETWORK PAYLOAD CHECK: (Reliable fallback)
+      if (body && (body.includes('"compareIndex"') || body.includes('compareIndex='))) return true;
+      if (url && url.includes('compareIndex=')) return true;
+
+      // 3. TEMPORAL FALLBACK: Trust the Alternator
+      if (navReqCount >= 2) return true;
+    } catch(e) {}
+    return false;
+  };
+
   // ---------------------------------------------------------
   // 1. FIX THE RIGHT PANEL (Sizes Only)
   // ---------------------------------------------------------
@@ -300,8 +330,24 @@
 
     try {
       const allRules = getJourneyRules();
-      const sideSpecificRules = allRules.filter(r => (r.paneSide || 'left') === requestSide);
+      
+      const isComp = isCompareRequest(url, requestBody);
+      const sideSpecificRules = allRules.filter(r => {
+        if (isComp) {
+          // WORLD 1: COMPARE MODE. 
+          // Strictly forbid 'all' (Non-Compare) rules.
+          return r.paneSide === requestSide && r.paneSide !== 'all';
+        } else {
+          // WORLD 2: NON-COMPARE MODE.
+          // Strictly only allow 'all' rules.
+          return r.paneSide === 'all';
+        }
+      });
 
+      if (isComp && allRules.some(r => r.paneSide === 'all')) {
+        console.log(`🚫 [CS Math] Comparison Active. Filtering out Non-Compare rules.`);
+      }
+      
       // ONLY INTERCEPT SIZES, IGNORE MAPPINGS ENTIRELY
       if (url.includes('/navigation-path') && !url.includes('/mappings')) {
         const clone = response.clone();
@@ -349,8 +395,23 @@
         try {
           const requestSide = this._customDemoRequestSide;
           const allRules = getJourneyRules();
-          const sideSpecificRules = allRules.filter(r => (r.paneSide || 'left') === requestSide);
 
+          // FIX: Use XHR instance variables
+          const isComp = isCompareRequest(this._customDemoUrl, this._customDemoBody);
+          const sideSpecificRules = allRules.filter(r => {
+            if (isComp) {
+              // WORLD 1: COMPARE MODE.
+              return r.paneSide === requestSide && r.paneSide !== 'all';
+            } else {
+              // WORLD 2: NON-COMPARE MODE.
+              return r.paneSide === 'all';
+            }
+          });
+
+          if (isComp && allRules.some(r => r.paneSide === 'all')) {
+            console.log(`🚫 [CS Math XHR] Comparison Active. Filtering out Non-Compare rules.`);
+          }
+          
           // ONLY INTERCEPT SIZES, IGNORE MAPPINGS ENTIRELY
           if (this._customDemoUrl.includes('/navigation-path') && !this._customDemoUrl.includes('/mappings')) {
              const data = JSON.parse(this.responseText);
