@@ -205,90 +205,194 @@
   };
 
   // ---------------------------------------------------------
-  // 1. FIX THE RIGHT PANEL (Sizes Only)
+  // 1. FIX THE RIGHT PANEL (Strict Decimal Reallocation)
   // ---------------------------------------------------------
   const fixRightPanel = (elementsArray, rules) => {
     if (!Array.isArray(elementsArray) || !rules.length) return false;
     let changed = false;
+
+    const lockedIndices = new Set();
+    let lockedPercentSum = 0;
+    let unlockedNativeVolume = 0;
+    let exitVolume = 0;
     
-    elementsArray.forEach(el => {
-      rules.forEach(rule => {
-        const targetName = String(getEffectiveName(rule)).toLowerCase();
+    const getVol = (el) => {
+      if (el.paMetrics && typeof el.paMetrics.sessionRetentionCount === 'number') return el.paMetrics.sessionRetentionCount;
+      if (typeof el.value === 'number') return el.value;
+      if (typeof el.size === 'number') return el.size;
+      return 0;
+    };
+
+    const isExit = (el) => el.name && typeof el.name === 'string' && el.name.includes('END_');
+
+    const grossVolume = elementsArray.reduce((sum, el) => sum + getVol(el), 0);
+    if (grossVolume === 0) return false; 
+
+    elementsArray.forEach(el => { if (isExit(el)) exitVolume += getVol(el); });
+
+    // PHASE 1: Apply rules and LOCK targets
+    elementsArray.forEach((el, idx) => {
+      if (isExit(el)) return;
+
+      const elName = String(el.name || '').toLowerCase();
+      const matchingRule = rules.find(rule => {
+        const targetName = String(rule.renameTo || rule.originalName || rule.targetNode || '').toLowerCase();
         const original = String(rule.originalName || rule.targetNode || '').toLowerCase();
-        const elName = String(el.name || '').toLowerCase();
-        
-        if (elName === targetName || elName === original) {
-          el.percent = (rule.percent / 100); 
-          changed = true;
-        }
+        return elName === targetName || elName === original;
       });
+
+      if (matchingRule) {
+        const targetPct = matchingRule.percent / 100; // Strictly 0.20
+        const newVolume = Math.round(grossVolume * targetPct); 
+        
+        if (el.paMetrics && typeof el.paMetrics.sessionRetentionCount === 'number') el.paMetrics.sessionRetentionCount = newVolume;
+        if (typeof el.value === 'number') el.value = newVolume;
+        if (typeof el.size === 'number') el.size = newVolume;
+        
+        // FIX: Always pass pure decimal. The UI will multiply by 100.
+        if (typeof el.percent !== 'undefined') el.percent = targetPct;
+
+        lockedIndices.add(idx);
+        lockedPercentSum += targetPct;
+        changed = true;
+      } else {
+        unlockedNativeVolume += getVol(el);
+      }
     });
-    return changed;
+
+    if (!changed) return false;
+
+    // PHASE 2: Compress/Inflate unlocked siblings
+    let leftoverPct = 1.0 - lockedPercentSum - (exitVolume / grossVolume);
+    if (leftoverPct < 0) leftoverPct = 0;
+    const leftoverVolume = grossVolume * leftoverPct;
+
+    elementsArray.forEach((el, idx) => {
+      if (!lockedIndices.has(idx) && !isExit(el)) {
+        const nativeVol = getVol(el);
+        const share = unlockedNativeVolume === 0 ? 0 : (nativeVol / unlockedNativeVolume);
+        const newVolume = Math.round(leftoverVolume * share);
+
+        if (el.paMetrics && typeof el.paMetrics.sessionRetentionCount === 'number') el.paMetrics.sessionRetentionCount = newVolume;
+        if (typeof el.value === 'number') el.value = newVolume;
+        if (typeof el.size === 'number') el.size = newVolume;
+        
+        if (typeof el.percent !== 'undefined') el.percent = leftoverPct * share; // Strictly pure decimal
+      }
+    });
+
+    return true;
   };
 
   // ---------------------------------------------------------
-  // 2. FIX THE SUNBURST VISUAL (Sizes Only)
+  // 2. FIX THE SUNBURST VISUAL (Ring-Based Reallocation with Subtree Scaling)
   // ---------------------------------------------------------
   const stealSiblingTraffic = (node, rules) => {
     if (!node || !node.children || !Array.isArray(node.children) || !rules.length) return false;
     let changed = false;
 
-    rules.forEach(rule => {
-      const targetName = String(getEffectiveName(rule)).toLowerCase();
-      const original = String(rule.originalName || rule.targetNode || '').toLowerCase();
-      
-      const targetIndex = node.children.findIndex(c => {
-         const cName = String(c.name || '').toLowerCase();
-         return cName === targetName || cName === original;
+    const lockedIndices = new Set();
+    let lockedPercentSum = 0;
+    let unlockedNativeVolume = 0;
+    let exitVolume = 0;
+
+    const getNativeVol = (c) => {
+      if (c.paMetrics && c.paMetrics.sessionRetentionCount !== undefined) return Number(c.paMetrics.sessionRetentionCount) || 0;
+      if (c.size !== undefined) return Number(c.size) || 0;
+      if (c.value !== undefined) return Number(c.value) || 0;
+      return 0;
+    };
+
+    // NEW: Recursive scaler to shrink/inflate the entire downstream path
+    const scaleSubtree = (n, factor) => {
+      if (!n || !n.children || !Array.isArray(n.children)) return;
+      n.children.forEach(child => {
+        if (child.paMetrics && typeof child.paMetrics.sessionRetentionCount === 'number') child.paMetrics.sessionRetentionCount *= factor;
+        if (typeof child.value === 'number') child.value *= factor;
+        if (typeof child.size === 'number') child.size *= factor;
+        if (typeof child.absoluteValue === 'number') child.absoluteValue *= factor;
+        // Note: child.percent is not scaled because its relative proportion to its parent remains identical!
+        scaleSubtree(child, factor);
+      });
+    };
+
+    const isExit = (c) => c.name && typeof c.name === 'string' && c.name.includes('END_');
+
+    const ringVolume = node.children.reduce((sum, c) => sum + getNativeVol(c), 0);
+    
+    if (ringVolume === 0) {
+      node.children.forEach(child => { if (stealSiblingTraffic(child, rules)) changed = true; });
+      return changed;
+    }
+
+    node.children.forEach(c => { if (isExit(c)) exitVolume += getNativeVol(c); });
+
+    // PHASE 1: Apply rules
+    node.children.forEach((c, idx) => {
+      if (isExit(c)) return;
+
+      const cName = String(c.name || '').toLowerCase();
+      const matchingRule = rules.find(rule => {
+        const targetName = String(rule.renameTo || rule.originalName || rule.targetNode || '').toLowerCase();
+        const original = String(rule.originalName || rule.targetNode || '').toLowerCase();
+        return cName === targetName || cName === original;
       });
 
-      if (targetIndex !== -1) {
-        const totalParentSize = node.size || 0;
-        let newTargetSize = Math.round(totalParentSize * (rule.percent / 100));
+      if (matchingRule) {
+        const targetPct = matchingRule.percent / 100;
+        const oldSize = getNativeVol(c);
+        const newTargetSize = Math.round(ringVolume * targetPct); 
+        const scaleFactor = oldSize === 0 ? 0 : (newTargetSize / oldSize);
         
-        let siblingSum = 0;
-        let exitPathSum = 0;
+        c.size = newTargetSize;
+        c.value = newTargetSize;
+        c.absoluteValue = newTargetSize;
+        if (c.paMetrics) c.paMetrics.sessionRetentionCount = newTargetSize;
+        c.percent = targetPct; 
 
-        node.children.forEach((c, idx) => {
-          if (idx !== targetIndex) {
-            if (c.name && typeof c.name === 'string' && c.name.includes('END_')) {
-              exitPathSum += (c.size || 0);
-            } else {
-              siblingSum += (c.size || 0);
-            }
-          }
-        });
+        // Scale everything downstream so the chart engine accepts our new size
+        scaleSubtree(c, scaleFactor);
 
-        if (newTargetSize + exitPathSum > totalParentSize) {
-           newTargetSize = totalParentSize - exitPathSum;
-           if (newTargetSize < 0) newTargetSize = 0;
-        }
-
-        const leftoverForSiblings = totalParentSize - newTargetSize - exitPathSum;
-
-        node.children.forEach((c, idx) => {
-          if (idx === targetIndex) {
-            c.size = newTargetSize;
-            if (c.paMetrics) c.paMetrics.sessionRetentionCount = newTargetSize;
-          } else if (c.name && typeof c.name === 'string' && c.name.includes('END_')) {
-            // Keep exits intact
-          } else {
-            const siblingShare = siblingSum === 0 ? 0 : ((c.size || 0) / siblingSum);
-            c.size = Math.round(leftoverForSiblings * siblingShare);
-            if (c.size < 0) c.size = 0; 
-            if (c.paMetrics) c.paMetrics.sessionRetentionCount = c.size;
-          }
-        });
+        lockedIndices.add(idx);
+        lockedPercentSum += targetPct;
         changed = true;
+      } else {
+        unlockedNativeVolume += getNativeVol(c);
       }
     });
 
+    if (changed) {
+      // PHASE 2: Distribute leftover
+      let leftoverPct = 1.0 - lockedPercentSum - (exitVolume / ringVolume);
+      if (leftoverPct < 0) leftoverPct = 0;
+      const leftoverVolume = ringVolume * leftoverPct;
+
+      node.children.forEach((c, idx) => {
+        if (!lockedIndices.has(idx) && !isExit(c)) {
+           const nativeVol = getNativeVol(c);
+           const share = unlockedNativeVolume === 0 ? 0 : (nativeVol / unlockedNativeVolume);
+           const newSize = Math.round(leftoverVolume * share);
+           const scaleFactor = nativeVol === 0 ? 0 : (newSize / nativeVol);
+           
+           c.size = newSize;
+           c.value = newSize;
+           c.absoluteValue = newSize;
+           if (c.paMetrics) c.paMetrics.sessionRetentionCount = newSize;
+           c.percent = leftoverPct * share; 
+
+           // Scale the un-targeted siblings' downstream paths too
+           scaleSubtree(c, scaleFactor);
+        }
+      });
+    }
+
+    // Recurse down the tree to apply any deeper rules
     node.children.forEach(child => {
       if (stealSiblingTraffic(child, rules)) changed = true;
     });
 
     return changed;
-  };
+  }; 
 
   // ---------------------------------------------------------
   // 3. THE HARVESTER 
