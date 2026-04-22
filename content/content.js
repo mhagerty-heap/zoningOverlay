@@ -1551,7 +1551,7 @@
       }
     });
 
-    return best && best.distance <= 28 ? best : null;
+    return best && best.distance <= 8 ? best : null;
   }
 
   function buildHeatmapPointEditorState(clientX, clientY, surfaceEl = null, anchorHintEl = null, eventPath = []) {
