@@ -267,23 +267,35 @@
 
   
 
-  function setActivePageKey(nextKey, syncGlobal = false) {
+  function setActivePageKey(nextKey, syncToFrames = false) {
     if (!nextKey) return;
     activePageKey = nextKey;
-    if (syncGlobal && isTopFrame) {
-      chrome.storage.local.set({ csZoningActivePageKey: nextKey });
+    
+    // NEW FIX: Broadcast the key exclusively to frames within THIS tab.
+    if (syncToFrames && isTopFrame) {
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: { type: 'syncActivePageKey', key: nextKey }
+      }, () => { void chrome.runtime.lastError; });
     }
   }
 
   function loadActivePageKey() {
     return new Promise(resolve => {
-      chrome.storage.local.get('csZoningActivePageKey', result => {
-        if (result.csZoningActivePageKey) {
-          activePageKey = result.csZoningActivePageKey;
-        }
-        log('Loaded active page key:', activePageKey || '(none)');
-        resolve();
-      });
+      if (isTopFrame) {
+         // Top frame sets the truth based on its URL
+         activePageKey = normalizeCsUrlKey(window.location.href);
+         resolve();
+      } else {
+         // Subframes must ask the Top Frame for the true URL
+         chrome.runtime.sendMessage({
+           type: 'broadcastToTab',
+           payload: { type: 'requestActivePageKey' }
+         }, () => {
+           void chrome.runtime.lastError;
+           resolve();
+         });
+      }
     });
   }
 
@@ -4433,8 +4445,13 @@
     if (isTopFrame) {
       const selectedMetricType = localResult.selectedMetricType || csMetricTypeName || '';
       
-      // BULLETPROOF MESSAGING (Matches Bulk & Nuke logic to safely await the 400ms delay)
+      // BULLETPROOF MESSAGING: Added a 1.5s safety timeout to prevent "Applying..." hangs
       const remoteResponses = await new Promise(resolve => {
+        const safetyFuse = setTimeout(() => {
+          log('Auto-Exposure broadcast timed out waiting for iframe receipts.');
+          resolve([]); 
+        }, 1500);
+
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
           payload: {
@@ -4443,6 +4460,7 @@
             options: { ...options, selectedMetricType, persistMode: 'merge' }
           }
         }, (response) => {
+          clearTimeout(safetyFuse); // Disarm the fuse if they reply in time!
           if (!response || !response.results) return resolve([]);
           const validReplies = response.results
             .filter(r => r.payload && r.payload.ok && !r.payload.skippedOrigin)
@@ -4936,15 +4954,16 @@
     }
 
     if (isTopFrame) {
-      await new Promise(resolve => {
-        chrome.runtime.sendMessage({
-          type: 'broadcastToTab',
-          payload: { type: 'resetAllFrames' }
-        }, () => {
-          void chrome.runtime.lastError;
-          resolve(true);
-        });
+      // CRITICAL FIX: Fire and forget! Do not 'await' this broadcast. 
+      // If a hidden tracking iframe fails to respond, it will permanently 
+      // block the Top Frame from reaching the storage wipe below.
+      chrome.runtime.sendMessage({
+        type: 'broadcastToTab',
+        payload: { type: 'resetAllFrames' }
+      }, () => {
+        void chrome.runtime.lastError;
       });
+      
       await resetAllInFrame();
       await persistOverrides();
       await persistHeatmapPointOverrides();
@@ -6594,6 +6613,31 @@
       return true;
     }
 
+    if (msg.type === 'requestActivePageKey') {
+      if (isTopFrame && activePageKey) {
+        chrome.runtime.sendMessage({
+          type: 'broadcastToTab',
+          payload: { type: 'syncActivePageKey', key: activePageKey }
+        });
+      }
+      sendResponse({ok: true});
+      return true;
+    }
+
+    if (msg.type === 'syncActivePageKey') {
+      if (activePageKey !== msg.key) {
+        activePageKey = msg.key;
+        Promise.all([loadOverrides(), loadHeatmapPointOverrides()]).then(() => {
+          syncZoneWatchers();
+          applyAllOverrides();
+          renderHeatmapPointOverlays();
+          updateToolbar();
+        });
+      }
+      sendResponse({ok: true});
+      return true;
+    }
+
     if (msg.type === 'syncMetricName') {
       if (msg.metrics) {
          csActiveMetrics = msg.metrics;
@@ -7393,19 +7437,6 @@
       if (nextVisible !== uiVisible) {
         log('Storage UI visibility update received:', nextVisible);
         setUiVisible(nextVisible, false);
-      }
-    }
-    if (changes.csZoningActivePageKey) {
-      const nextKey = changes.csZoningActivePageKey.newValue || '';
-      if (nextKey && nextKey !== activePageKey) {
-        activePageKey = nextKey;
-        log('Storage active page key update received:', activePageKey);
-        Promise.all([loadOverrides(), loadHeatmapPointOverrides()]).then(() => {
-          syncZoneWatchers();
-          applyAllOverrides();
-          renderHeatmapPointOverlays();
-          updateToolbar();
-        });
       }
     }
     if (changes.csZoningOverrides) {
