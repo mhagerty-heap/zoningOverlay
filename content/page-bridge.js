@@ -236,6 +236,9 @@
 
       const elName = String(el.name || '').toLowerCase();
       const matchingRule = rules.find(rule => {
+        // NEW: If the rule has no percentage (Rename Only), ignore it for math!
+        if (rule.percent === null || rule.percent === undefined) return false;
+        
         const targetName = String(rule.renameTo || rule.originalName || rule.targetNode || '').toLowerCase();
         const original = String(rule.originalName || rule.targetNode || '').toLowerCase();
         return elName === targetName || elName === original;
@@ -333,6 +336,9 @@
 
       const cName = String(c.name || '').toLowerCase();
       const matchingRule = rules.find(rule => {
+        // NEW: If the rule has no percentage (Rename Only), ignore it for math!
+        if (rule.percent === null || rule.percent === undefined) return false;
+        
         const targetName = String(rule.renameTo || rule.originalName || rule.targetNode || '').toLowerCase();
         const original = String(rule.originalName || rule.targetNode || '').toLowerCase();
         return cName === targetName || cName === original;

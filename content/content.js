@@ -5474,11 +5474,19 @@
              <option value="" disabled selected>Waiting for data...</option>
            </select>
 
-           <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Rename To (Optional):</label>
+           <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Rename To:</label>
            <input type="text" id="journey-rename-to" class="inp" placeholder="e.g., The Golden Path" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
 
-           <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Percentage (%):</label>
-           <input type="number" id="journey-target-percent" class="inp" placeholder="e.g., 85" min="1" max="100" style="width: 100%; margin-bottom: 15px;" ${isEditing ? '' : 'disabled'}>
+           <div class="chk-row" style="margin-bottom: 8px;">
+             <label style="display:flex; cursor:pointer; font-size: 11px; color: #666; font-weight: 600; align-items: center;">
+               <input type="checkbox" id="chk-journey-resize" ${isEditing ? '' : 'disabled'}>
+               <span style="margin-left: 6px;">Resize Node (Advanced)</span>
+             </label>
+             <span class="help-icon" title="Checking this allows you to change the node's traffic volume. The math engine will automatically scale all downstream paths that flow out of this node proportionately, keeping the entire journey visually and mathematically sound.">[?]</span>
+           </div>
+
+           <label id="lbl-journey-percent" style="font-size: 10px; font-weight: 700; color:#b0b0c0; margin-bottom: 4px; display: block; transition: color 0.2s;">Target Percentage (%):</label>
+           <input type="number" id="journey-target-percent" class="inp" placeholder="e.g., 85" min="1" max="100" style="width: 100%; margin-bottom: 15px; opacity: 0.5; transition: opacity 0.2s;" disabled>
 
            <button id="btn-add-journey-rule" class="btn btn-apply" style="width: 100%;" ${isEditing ? '' : 'disabled'}>Add Journey Rule</button>
          </div>         
@@ -5521,7 +5529,7 @@
               }
             </div>
             <div style="font-size:10px; color:#888;">
-              Target: ${r.percent}% <b style="color: #2c2c8c; margin-left: 6px;">[${paneMode}]</b>
+              Target: ${r.percent !== null ? r.percent + '%' : '<i>Unchanged</i>'} <b style="color: #2c2c8c; margin-left: 6px;">[${paneMode}]</b>
             </div>
           </div>
           <button class="btn-del-journey-rule" data-index="${i}" style="background:#fff0f0; color:#cc3333; border:1px solid #ffcccc; border-radius:4px; font-size:10px; padding:3px 6px; cursor:pointer; flex-shrink:0;">✕</button>
@@ -5564,41 +5572,59 @@
       });
     });
 
-    // 2. Updated Add Rule Listener to capture the Pane
+    // NEW: Toggle the Percentage Input when checkbox is clicked
+    const chkResize = shadow.getElementById('chk-journey-resize');
+    const inpPercent = shadow.getElementById('journey-target-percent');
+    const lblPercent = shadow.getElementById('lbl-journey-percent');
+
+    chkResize?.addEventListener('change', (e) => {
+      const isChecked = e.target.checked;
+      if (inpPercent) {
+         inpPercent.disabled = !isChecked;
+         inpPercent.style.opacity = isChecked ? '1' : '0.5';
+         if (!isChecked) inpPercent.value = ''; // Clear it if they uncheck
+      }
+      if (lblPercent) {
+         lblPercent.style.color = isChecked ? '#888' : '#b0b0c0';
+      }
+    });
+
+    // 2. Updated Add Rule Listener to capture the Pane & Resize Checkbox
     shadow.getElementById('btn-add-journey-rule')?.addEventListener('click', () => {
-    const targetNodeRaw = shadow.getElementById('journey-target-node').value;
-    const renameToRaw = shadow.getElementById('journey-rename-to').value.trim();
-    const percentRaw = shadow.getElementById('journey-target-percent').value;
+      const targetNodeRaw = shadow.getElementById('journey-target-node').value;
+      const renameToRaw = shadow.getElementById('journey-rename-to').value.trim();
+      
+      const isResizeChecked = shadow.getElementById('chk-journey-resize')?.checked;
+      const percentRaw = isResizeChecked ? shadow.getElementById('journey-target-percent').value : null;
 
-    if (!targetNodeRaw || !percentRaw) return alert('Please select a node and percentage.');
+      if (!targetNodeRaw) return alert('Please select a target node.');
+      if (!renameToRaw && !isResizeChecked) return alert('Please provide a new name, or check "Resize Node" to change the percentage.');
+      if (isResizeChecked && !percentRaw) return alert('Please enter a target percentage, or uncheck "Resize Node".');
 
-    let rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
-    const newRuleTemplate = {
-      originalName: targetNodeRaw,           
-      renameTo: renameToRaw || targetNodeRaw,  
-      percent: parseFloat(percentRaw),
-      createdAt: Date.now()
-    };
+      let rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
+      const newRuleTemplate = {
+        originalName: targetNodeRaw,           
+        renameTo: renameToRaw || targetNodeRaw,  
+        percent: percentRaw ? parseFloat(percentRaw) : null,
+        createdAt: Date.now()
+      };
 
-    if (selectedJourneyPane === 'both') {
-      // Create two separate, isolated rules for Compare mode
-      rules = rules.filter(r => !(r.originalName === targetNodeRaw && (r.paneSide === 'left' || r.paneSide === 'right')));
-      rules.push({ ...newRuleTemplate, paneSide: 'left' });
-      rules.push({ ...newRuleTemplate, paneSide: 'right' });
-    } else {
-      // Update the specific mode (all, left, or right)
-      rules = rules.filter(r => !(r.originalName === targetNodeRaw && r.paneSide === selectedJourneyPane));
-      rules.push({ ...newRuleTemplate, paneSide: selectedJourneyPane });
-    }
+      if (selectedJourneyPane === 'both') {
+        rules = rules.filter(r => !(r.originalName === targetNodeRaw && (r.paneSide === 'left' || r.paneSide === 'right')));
+        rules.push({ ...newRuleTemplate, paneSide: 'left' });
+        rules.push({ ...newRuleTemplate, paneSide: 'right' });
+      } else {
+        rules = rules.filter(r => !(r.originalName === targetNodeRaw && r.paneSide === selectedJourneyPane));
+        rules.push({ ...newRuleTemplate, paneSide: selectedJourneyPane });
+      }
 
-    localStorage.setItem('csDemoJourneyRules', JSON.stringify(rules));
-    shadow.getElementById('journey-rename-to').value = '';
-    shadow.getElementById('journey-target-percent').value = '';
-    if (typeof updateToolbar === 'function') updateToolbar();
-    alert(`Rule(s) applied to ${selectedJourneyPane.toUpperCase()} mode.`);
-  });
-
-    
+      localStorage.setItem('csDemoJourneyRules', JSON.stringify(rules));
+      shadow.getElementById('journey-rename-to').value = '';
+      if (inpPercent) inpPercent.value = '';
+      if (typeof updateToolbar === 'function') updateToolbar();
+      renderJourneyRules(); // Auto-refresh the list!
+      alert(`Rule(s) applied to ${selectedJourneyPane.toUpperCase()} mode.`);
+    });    
 
     // 3. Dynamic Dropdown Populator
     window.__csUpdateJourneyDropdown = () => {
@@ -5968,7 +5994,7 @@
                       }
                     </span>
                     <span class="meta">
-                      Target: ${r.percent}% 
+                      Target: ${r.percent !== null ? r.percent + '%' : '<i>Unchanged</i>'} 
                       <b style="color: #2c2c8c; margin-left: 8px;">[${paneMode}]</b>
                     </span>
                   </div>
