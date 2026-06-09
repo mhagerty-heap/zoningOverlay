@@ -72,6 +72,7 @@
     'Global zone click fallback'
   ];
   const CS_ZONE_SELECTORS = 'app-zone-elements, app-zone-element';
+  const CS_ZONE_TAG_SET = new Set(['app-zone-elements', 'app-zone-element']);
   const HEATMAP_LAYER_KEYS = ['clicks', 'moves', 'scrolls', 'attention'];
   const isTopFrame = window.top === window;
   const frameTag = isTopFrame ? 'top' : 'subframe';
@@ -178,7 +179,7 @@
       frameContextKey,
       href: location.href,
       isTopFrame
-    }, '*');
+    }, location.origin || '*');
   } catch (_) {
     // Ignore readiness marker failures.
   }
@@ -210,7 +211,7 @@
               return String(v);
             }
           })
-        }, '*');
+        }, 'https://app.contentsquare.com');
       } catch (_) {
         // Ignore cross-origin relay failures.
       }
@@ -240,6 +241,7 @@
   let heatmapHintHost = null;
   let heatmapHintTimer = null;
   let heatmapPointOverrides = {};
+  let journeyRules = []; // Authoritative in-memory copy — backed by chrome.storage
   let heatmapOverlayHost = null;
   let heatmapOverlayShadow = null;
   const heatmapSurfaceOverlays = new Map();
@@ -319,7 +321,9 @@
     }
 
     // Priority 3: Project + Snapshot fallback
-    const params = new URLSearchParams(window.location.search || window.top.location.search);
+    let topSearch = '';
+    try { topSearch = window.top.location.search; } catch (_) {}
+    const params = new URLSearchParams(window.location.search || topSearch);
     const pid = params.get('projectId');
     const snid = params.get('snapshot');
     if (pid && snid) return `cs-page-${pid}-${snid}`;
@@ -442,6 +446,36 @@
     });
   }
 
+  function loadJourneyRules() {
+    return new Promise(resolve => {
+      chrome.storage.local.get('csDemoJourneyRules', result => {
+        try {
+          const raw = result.csDemoJourneyRules;
+          journeyRules = Array.isArray(raw) ? raw : [];
+        } catch (_) {
+          journeyRules = [];
+        }
+        resolve();
+      });
+    });
+  }
+
+  function persistJourneyRules() {
+    return new Promise(resolve => {
+      chrome.storage.local.set({ csDemoJourneyRules: journeyRules }, resolve);
+    });
+  }
+
+  // Broadcasts updated rules to the page-bridge so the fetch interceptor picks them up
+  // without a page reload.
+  function syncJourneyRulesToPageWorld() {
+    try {
+      window.dispatchEvent(new CustomEvent('cs-demo-journey-rules-updated', {
+        detail: { rules: journeyRules }
+      }));
+    } catch (_) {}
+  }
+
   function closeScenariosPanel() {
     const panel = document.getElementById('cs-demo-scenarios-host');
     if (panel) panel.remove();
@@ -550,7 +584,7 @@
   function collectZoneElementsFromRoot(root, out) {
     if (!root) return;
 
-    if (root.nodeType === 1 && root.tagName && CS_ZONE_SELECTORS.includes(root.tagName.toLowerCase())) {
+    if (root.nodeType === 1 && root.tagName && CS_ZONE_TAG_SET.has(root.tagName.toLowerCase())) {
       out.push(root);
     }
 
@@ -968,7 +1002,7 @@
 
   function resolveAnchorPathFromDocument(pathRaw) {
     if (!pathRaw) return null;
-    const parts = String(pathRaw).split('.').map(v => Number(v)).filter(Number.isInteger);
+    const parts = String(pathRaw).split('.').map(v => Number(v)).filter(v => Number.isInteger(v) && v >= 0);
     let node = document.documentElement;
     for (const idx of parts) {
       if (!node || !node.children || idx < 0 || idx >= node.children.length) {
@@ -1234,7 +1268,7 @@
 
     const pathRaw = String(point?.anchorPath || '');
     if (fallbackSurface && pathRaw) {
-      const parts = pathRaw.split('.').map(v => Number(v)).filter(Number.isInteger);
+      const parts = pathRaw.split('.').map(v => Number(v)).filter(v => Number.isInteger(v) && v >= 0);
       let node = fallbackSurface;
       for (const idx of parts) {
         if (!node || !node.children || idx < 0 || idx >= node.children.length) {
@@ -2209,14 +2243,19 @@
     heatmapOverlayLoopRunning = true;
     
     const loop = () => {
-      const mode = getActiveAnalysisMode();
-      // If the heatmap is visible, sync the markers 60 times a second
-      if (uiVisible && (mode === 'heatmap' || isHeatmapEditingContext() || isLikelyHeatmapView())) {
-        renderHeatmapPointOverlays();
-        requestAnimationFrame(loop);
-      } else {
-        // If we switch to Zoning, kill the loop and hide the markers
-        clearHeatmapPointOverlaysNow();
+      try {
+        const mode = getActiveAnalysisMode();
+        // If the heatmap is visible, sync the markers 60 times a second
+        if (uiVisible && (mode === 'heatmap' || isHeatmapEditingContext() || isLikelyHeatmapView())) {
+          renderHeatmapPointOverlays();
+          requestAnimationFrame(loop);
+        } else {
+          // If we switch to Zoning, kill the loop and hide the markers
+          clearHeatmapPointOverlaysNow();
+          heatmapOverlayLoopRunning = false;
+        }
+      } catch (_) {
+        // Ensure the loop flag is always released so it can restart after an error.
         heatmapOverlayLoopRunning = false;
       }
     };
@@ -2278,7 +2317,6 @@
   }
 
   function getTotalOverrideCount() {
-    const journeyRules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
     return Object.keys(overrides).length + Object.keys(heatmapPointOverrides).length + journeyRules.length;
   }
 
@@ -2883,8 +2921,8 @@
         
         iframes.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
         if (iframes.length >= 2) {
-           iframes[0].contentWindow?.postMessage({ __csDemoPaneSide: 'left' }, '*');
-           iframes[iframes.length - 1].contentWindow?.postMessage({ __csDemoPaneSide: 'right' }, '*');
+           iframes[0].contentWindow?.postMessage({ __csDemoPaneSide: 'left' }, 'https://snapshot.contentsquare.com');
+           iframes[iframes.length - 1].contentWindow?.postMessage({ __csDemoPaneSide: 'right' }, 'https://snapshot.contentsquare.com');
         }
 
       } else if (visibleTriggers.length === 1) {
@@ -3308,7 +3346,9 @@
         const entry = zoneObservers.get(zoneKey);
         if (entry) {
           entry.observer.disconnect();
-          entry.element.removeEventListener('click', onZoneElementClick, true);
+          ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
+            entry.element.removeEventListener(type, onZoneElementClick, true);
+          });
         }
         zoneObservers.delete(zoneKey);
       }
@@ -4934,8 +4974,9 @@
     // 3. INTERNAL CLEANUP
     overrides = {};
     heatmapPointOverrides = {};
-    // NEW: Nuke the Journey Rules from localStorage
-    localStorage.removeItem('csDemoJourneyRules');
+    journeyRules = [];
+    persistJourneyRules();
+    syncJourneyRulesToPageWorld();
 
     // 4. GENTLE RE-TRIGGER
     window.dispatchEvent(new Event('resize'));
@@ -5503,27 +5544,26 @@
     const renderJourneyRules = () => {
       const listContainer = shadow.getElementById('journey-rules-list');
       if (!listContainer) return;
-      const rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
-      
-      if (rules.length === 0) {
+
+      if (journeyRules.length === 0) {
         listContainer.innerHTML = '<div class="hint" style="text-align:center; padding: 10px 0;">No active rules.</div>';
         return;
       }
-      
-      listContainer.innerHTML = rules.map((r, i) => {
+
+      listContainer.innerHTML = journeyRules.map((r, i) => {
         const origName = r.originalName || r.targetNode;
         const newName = r.renameTo || origName;
         const hasRename = r.renameTo && r.renameTo !== origName;
         const paneMode = r.paneSide === 'left' ? 'COMPARE LEFT' :
-                         r.paneSide === 'right' ? 'COMPARE RIGHT' : 
+                         r.paneSide === 'right' ? 'COMPARE RIGHT' :
                          'NON-COMPARE';
         return `
         <div style="display:flex; justify-content:space-between; align-items:center; background:#fff; border:1px solid #e0e0f0; padding:6px 10px; border-radius:6px; margin-bottom:6px;">
           <div style="overflow:hidden; flex:1; padding-right:10px;">
             <div style="font-weight:600; font-size:11px; white-space:nowrap; text-overflow:ellipsis; margin-bottom:2px;">
-              ${hasRename 
+              ${hasRename
                 ? `<span style="color: #888; font-weight: normal;">${escHtml(origName)}</span>
-                   <span style="color: #5959dc; margin: 0 4px;">→</span> 
+                   <span style="color: #5959dc; margin: 0 4px;">→</span>
                    <span style="font-weight: 700;">${escHtml(newName)}</span>`
                 : `<span style="font-weight: 700;">${escHtml(origName)}</span>`
               }
@@ -5541,9 +5581,11 @@
       shadow.querySelectorAll('.btn-del-journey-rule').forEach(btn => {
         btn.addEventListener('click', (e) => {
           const idx = parseInt(e.target.dataset.index, 10);
-          rules.splice(idx, 1);
-          localStorage.setItem('csDemoJourneyRules', JSON.stringify(rules));
+          journeyRules.splice(idx, 1);
+          persistJourneyRules();
+          syncJourneyRulesToPageWorld();
           renderJourneyRules();
+          updateToolbar();
         });
       });
     };
@@ -5601,28 +5643,28 @@
       if (!renameToRaw && !isResizeChecked) return alert('Please provide a new name, or check "Resize Node" to change the percentage.');
       if (isResizeChecked && !percentRaw) return alert('Please enter a target percentage, or uncheck "Resize Node".');
 
-      let rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
       const newRuleTemplate = {
-        originalName: targetNodeRaw,           
-        renameTo: renameToRaw || targetNodeRaw,  
+        originalName: targetNodeRaw,
+        renameTo: renameToRaw || targetNodeRaw,
         percent: percentRaw ? parseFloat(percentRaw) : null,
         createdAt: Date.now()
       };
 
       if (selectedJourneyPane === 'both') {
-        rules = rules.filter(r => !(r.originalName === targetNodeRaw && (r.paneSide === 'left' || r.paneSide === 'right')));
-        rules.push({ ...newRuleTemplate, paneSide: 'left' });
-        rules.push({ ...newRuleTemplate, paneSide: 'right' });
+        journeyRules = journeyRules.filter(r => !(r.originalName === targetNodeRaw && (r.paneSide === 'left' || r.paneSide === 'right')));
+        journeyRules.push({ ...newRuleTemplate, paneSide: 'left' });
+        journeyRules.push({ ...newRuleTemplate, paneSide: 'right' });
       } else {
-        rules = rules.filter(r => !(r.originalName === targetNodeRaw && r.paneSide === selectedJourneyPane));
-        rules.push({ ...newRuleTemplate, paneSide: selectedJourneyPane });
+        journeyRules = journeyRules.filter(r => !(r.originalName === targetNodeRaw && r.paneSide === selectedJourneyPane));
+        journeyRules.push({ ...newRuleTemplate, paneSide: selectedJourneyPane });
       }
 
-      localStorage.setItem('csDemoJourneyRules', JSON.stringify(rules));
+      persistJourneyRules();
+      syncJourneyRulesToPageWorld();
       shadow.getElementById('journey-rename-to').value = '';
       if (inpPercent) inpPercent.value = '';
       if (typeof updateToolbar === 'function') updateToolbar();
-      renderJourneyRules(); // Auto-refresh the list!
+      renderJourneyRules();
       alert(`Rule(s) applied to ${selectedJourneyPane.toUpperCase()} mode.`);
     });    
 
@@ -5940,9 +5982,8 @@
     function renderPanel() {
       const zoningEntries = Object.entries(overrides);
       const heatmapEntries = Object.entries(heatmapPointOverrides);
-      // NEW: Grab Journey Rules
-      const journeyRules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
-      
+      // journeyRules is the module-level in-memory copy — no localStorage read needed
+
       const heatmapEntriesByLayer = HEATMAP_LAYER_KEYS.map(layer => {
         const points = heatmapEntries.filter(([, point]) => normalizeHeatmapLayerName(point?.layer) === layer);
         return { layer, label: getHeatmapLayerLabel(layer), points };
@@ -6040,9 +6081,9 @@
           if (el) await resetZoneOverride(el, getZoneKey(el), el.getAttribute('id'));
           else { delete overrides[key]; await persistOverrides(); }
         } else if (kind === 'journey') {
-          const rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
-          rules.splice(parseInt(index, 10), 1);
-          localStorage.setItem('csDemoJourneyRules', JSON.stringify(rules));
+          journeyRules.splice(parseInt(index, 10), 1);
+          await persistJourneyRules();
+          syncJourneyRulesToPageWorld();
         } else if (kind === 'heatmap') {
           delete heatmapPointOverrides[key];
           await persistHeatmapPointOverrides();
@@ -6457,12 +6498,12 @@
   function startJourneySweeper() {
     if (journeySweeperInterval) clearInterval(journeySweeperInterval);
     
-    console.log("🚀 [CS Demo] Visual Journey Sweeper Initialized (Optimized)!");
+    log('Global zone interaction', 'Visual Journey Sweeper Initialized');
     
     journeySweeperInterval = setInterval(() => {
       if (!masterEnabled || !window.location.href.includes('/navigation-path')) return;
       
-      const rules = JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
+      const rules = journeyRules;
       if (!rules.length) return;
 
       const center = window.innerWidth / 2;
@@ -6610,7 +6651,9 @@
 
     zoneObservers.forEach(entry => {
       entry.observer.disconnect();
-      entry.element.removeEventListener('click', onZoneElementClick, true);
+      ['pointerup', 'mouseup', 'click', 'contextmenu'].forEach(type => {
+        entry.element.removeEventListener(type, onZoneElementClick, true);
+      });
     });
     zoneObservers.clear();
 
@@ -6946,7 +6989,7 @@
       window.postMessage({
         __csDemoDebugResponse: true,
         detail
-      }, '*');
+      }, location.origin || '*');
     } catch (_) {
       // Ignore postMessage bridge failures.
     }
@@ -7684,6 +7727,8 @@
     await loadOverrides();
     //console.log('[ZONING-DEBUG][init] Loaded overrides:', Object.keys(overrides));
     await loadHeatmapPointOverrides();
+    await loadJourneyRules();
+    syncJourneyRulesToPageWorld();
     //console.log('[ZONING-DEBUG][init] Loaded heatmapPointOverrides:', Object.keys(heatmapPointOverrides));
 
     // 3. Start Document Observer

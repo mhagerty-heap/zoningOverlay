@@ -125,7 +125,8 @@
   if (window.__csDemoJourneyDynamicInstalled) return;
   window.__csDemoJourneyDynamicInstalled = true;
 
-  console.log('🚀 [CS Demo] Journey API Interceptor Active (Math Engine Only)');
+  const CS_BRIDGE_DEBUG = false;
+  const dbg = (...args) => { if (CS_BRIDGE_DEBUG) console.log(...args); };
 
   const extractUrl = (args) => {
     try {
@@ -136,13 +137,15 @@
     return '';
   };
 
-  const getJourneyRules = () => {
-    try {
-      return JSON.parse(localStorage.getItem('csDemoJourneyRules') || '[]');
-    } catch(e) {
-      return [];
-    }
-  };
+  // Journey rules are pushed from content.js via a CustomEvent whenever they change,
+  // so this script never needs to read localStorage.
+  let _journeyRulesCache = [];
+  window.addEventListener('cs-demo-journey-rules-updated', event => {
+    const rules = event && event.detail && Array.isArray(event.detail.rules) ? event.detail.rules : [];
+    _journeyRulesCache = rules;
+  });
+
+  const getJourneyRules = () => _journeyRulesCache;
 
   // --- TEMPORAL ALTERNATOR (For Chart Sizes Only) ---
   let navReqCount = 0;
@@ -158,7 +161,7 @@
     const timeSinceLast = now - lastReqTime;
 
     if (timeSinceLast > 2500) {
-      console.log(`🕵️ [CS Demo Math] Alternator Timer Reset! (Time since last request: ${timeSinceLast}ms)`);
+      dbg(`🕵️ [CS Demo Math] Alternator Timer Reset! (Time since last request: ${timeSinceLast}ms)`);
       navReqCount = 0;
     }
     lastReqTime = now;
@@ -166,7 +169,7 @@
     if (url.includes('/navigation-path') && !url.includes('/mappings')) {
       navReqCount++;
       const side = (navReqCount % 2 === 0) ? 'right' : 'left';
-      console.log(`🕵️ [CS Demo Math] Chart Request #${navReqCount} fired -> Assigned to ${side.toUpperCase()} PANE.`);
+      dbg(`🕵️ [CS Demo Math] Chart Request #${navReqCount} fired -> Assigned to ${side.toUpperCase()} PANE.`);
       return side;
     }
     return 'left';
@@ -455,7 +458,7 @@
       });
 
       if (isComp && allRules.some(r => r.paneSide === 'all')) {
-        console.log(`🚫 [CS Math] Comparison Active. Filtering out Non-Compare rules.`);
+        dbg(`🚫 [CS Math] Comparison Active. Filtering out Non-Compare rules.`);
       }
       
       // ONLY INTERCEPT SIZES, IGNORE MAPPINGS ENTIRELY
@@ -467,14 +470,14 @@
         if (data && data.payload) {
            if (data.payload.tree) {
              const uniqueNames = Array.from(extractAllNodeNames(data.payload.tree));
-             window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, '*');
+             window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, location.origin || '*');
            }
            if (fixRightPanel(data.payload.elements, sideSpecificRules)) changed = true;
            if (stealSiblingTraffic(data.payload.tree, sideSpecificRules)) changed = true;
         }
 
         if (changed) {
-          console.log(`✅ [CS Demo Math] SUCCESS: Applied ${sideSpecificRules.length} rule(s) to the ${requestSide.toUpperCase()} chart payload!`);
+          dbg(`✅ [CS Demo Math] SUCCESS: Applied ${sideSpecificRules.length} rule(s) to the ${requestSide.toUpperCase()} chart payload!`);
           return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
         }
       }
@@ -519,7 +522,7 @@
           });
 
           if (isComp && allRules.some(r => r.paneSide === 'all')) {
-            console.log(`🚫 [CS Math XHR] Comparison Active. Filtering out Non-Compare rules.`);
+            dbg(`🚫 [CS Math XHR] Comparison Active. Filtering out Non-Compare rules.`);
           }
           
           // ONLY INTERCEPT SIZES, IGNORE MAPPINGS ENTIRELY
@@ -530,7 +533,7 @@
              if (data && data.payload) {
                 if (data.payload.tree) {
                    const uniqueNames = Array.from(extractAllNodeNames(data.payload.tree));
-                   window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, '*');
+                   window.postMessage({ type: 'CS_JOURNEY_NODES_SCRAPED', nodes: uniqueNames.sort() }, location.origin || '*');
                 }
                 
                 if (fixRightPanel(data.payload.elements, sideSpecificRules)) changed = true;
@@ -538,9 +541,9 @@
              }
 
              if (changed) {
-                console.log(`%c✨ Applied Math to ${requestSide.toUpperCase()} Chart`, 'color: #2c2c8c; font-weight: bold;');
-                Object.defineProperty(this, 'responseText', { get: () => JSON.stringify(data) });
-                Object.defineProperty(this, 'response', { get: () => JSON.stringify(data) });
+                dbg(`%c✨ Applied Math to ${requestSide.toUpperCase()} Chart`, 'color: #2c2c8c; font-weight: bold;');
+                Object.defineProperty(this, 'responseText', { configurable: true, get: () => JSON.stringify(data) });
+                Object.defineProperty(this, 'response', { configurable: true, get: () => JSON.stringify(data) });
              }
           }
         } catch(e) { } 
