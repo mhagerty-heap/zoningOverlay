@@ -5036,7 +5036,7 @@
     }
 
     // 3. Tiny delay for the subframe to receive the message and update its local variable
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 400));
 
     refreshMetricTypeName();
     const currentMetricName = String(csMetricTypeName || '').trim();
@@ -5168,7 +5168,7 @@
       // Anti-Collision Stagger: Right pane waits 400ms before saving
       const isRightPane = Object.keys(paneGroups).some(k => k.includes('right'));
       if (isRightPane && !isTopFrame) {
-        await new Promise(resolve => setTimeout(resolve, 400));
+        await new Promise(resolve => setTimeout(resolve, 1200));
       }
 
       await persistOverridesMerged();
@@ -5191,7 +5191,7 @@
     }
 
     // DIRECT CABLE FIX: Give the whisper 150ms to settle and DOM to stabilize
-    await new Promise(resolve => setTimeout(resolve, 150));
+    await new Promise(resolve => setTimeout(resolve, 400));
 
     const metricsLibrary = Object.entries(metricRegistry).map(([name, config]) => ({
       name, ...config
@@ -5285,9 +5285,9 @@
     
     if (!isTopFrame) {
       if (hasRightPane) {
-        await new Promise(resolve => setTimeout(resolve, 600));
+        await new Promise(resolve => setTimeout(resolve, 1500));
       } else if (hasLeftPane) {
-        await new Promise(resolve => setTimeout(resolve, 300));
+        await new Promise(resolve => setTimeout(resolve, 400));
       }
     }
 
