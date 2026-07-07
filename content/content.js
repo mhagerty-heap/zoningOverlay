@@ -52,6 +52,7 @@
   const CS_FORCE_CONTEXT = true;
   const CS_DEFAULT_LOG_MODE = 'off'; // 'trace' | 'all' | 'off'
   const CS_ENABLE_HEATMAP_INTERACTIONS = true;
+  const CS_EXPOSURE_FLAT_TOP_PX = 420; // ~4.4in — Exposure Rate/Time stay pinned at max within this band of the pane top
   const CS_TRACE_LOG_PREFIXES = [
     'Intercepted zone click',
     'Opening top-frame editor for',
@@ -3019,6 +3020,20 @@
     return /(^|\s)exposure\s+(rate|time)(\s|$)/i.test(String(metricTypeName || '').trim());
   }
 
+  // Position ratio from actual y relative to the pane's y-range. When
+  // `useFlatTop` is set, zones within CS_EXPOSURE_FLAT_TOP_PX of the pane's
+  // topmost zone are pinned at the max (ratio 0) — most visitors definitely
+  // see the very top of a page, so it shouldn't already be decaying there.
+  // Returns null when position can't be determined (caller falls back to rank).
+  function computeDepthRatio(y, paneMinY, paneYSpan, useFlatTop) {
+    if (!(paneYSpan > 0) || !Number.isFinite(y)) return null;
+    const distanceFromTop = y - paneMinY;
+    if (!useFlatTop) return distanceFromTop / paneYSpan;
+    if (distanceFromTop <= CS_EXPOSURE_FLAT_TOP_PX) return 0;
+    const remainingSpan = paneYSpan - CS_EXPOSURE_FLAT_TOP_PX;
+    return remainingSpan > 0 ? Math.min(1, (distanceFromTop - CS_EXPOSURE_FLAT_TOP_PX) / remainingSpan) : 0;
+  }
+
   function formatPercent(value, decimals = 1) {
     const n = Number(value);
     if (!Number.isFinite(n)) return '0.0%';
@@ -5279,9 +5294,8 @@
           // Absolute Chaos: Pick a random number between Min and Max
           numericValue = pMin + Math.random() * (pMax - pMin);
         } else if (totalEligible > 1) {
-          const ratio = (paneYSpan > 0 && Number.isFinite(row.y))
-            ? (row.y - paneMinY) / paneYSpan
-            : index / (totalEligible - 1);
+          const depthRatio = computeDepthRatio(row.y, paneMinY, paneYSpan, isDepthOnly);
+          const ratio = depthRatio !== null ? depthRatio : index / (totalEligible - 1);
           // Exposure Rate/Time are pure depth functions — no per-element noise.
           const noise = isDepthOnly ? 0 : (Math.random() - 0.5) * jitter;
           const noisyRatio = Math.min(Math.max(ratio + noise, 0), 1);
@@ -5396,9 +5410,8 @@
             // Absolute Chaos
             val = pMin + Math.random() * (pMax - pMin);
           } else if (paneZones.length > 1) {
-            const ratio = (paneYSpan > 0 && Number.isFinite(row.y))
-              ? (row.y - paneMinY) / paneYSpan
-              : index / (paneZones.length - 1);
+            const depthRatio = computeDepthRatio(row.y, paneMinY, paneYSpan, isDepthOnly);
+            const ratio = depthRatio !== null ? depthRatio : index / (paneZones.length - 1);
             // Exposure Rate/Time are pure depth functions — no per-element noise.
             const noise = isDepthOnly ? 0 : (Math.random() - 0.5) * jitter;
             const noisyRatio = Math.min(Math.max(ratio + noise, 0), 1);
