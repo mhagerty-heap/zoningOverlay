@@ -18,10 +18,10 @@
     "exposure rate": { min: 20, max: 100, type: "percent" },
     "engagement rate": { min: 5, max: 45, type: "percent" },
     "hover rate": { min: 10, max: 55, type: "percent" },
-    "conversion rate per click": { min: 0.2, max: 6.5, type: "percent_long" },
-    "conversion rate per hover": { min: 0.1, max: 4.5, type: "percent_long" },
-    "purchase - cr per click": { min: 0.3, max: 5.5, type: "percent_long" },
-    "purchase - cr per hover": { min: 0.1, max: 3.5, type: "percent_long" },
+    "conversion rate per click": { min: 0.2, max: 6.5, type: "percent" },
+    "conversion rate per hover": { min: 0.1, max: 4.5, type: "percent" },
+    "purchase - cr per click": { min: 0.3, max: 5.5, type: "percent" },
+    "purchase - cr per hover": { min: 0.1, max: 3.5, type: "percent" },
     "time before first click": { min: 3, max: 20, type: "time" },
     "exposure time": { min: 2, max: 35, type: "time" },
     "float time": { min: 1, max: 15, type: "time" },
@@ -2980,6 +2980,42 @@
     return true;
   }
 
+  function parseNumericFromDisplayValue(text) {
+    const cleaned = String(text || '').replace(/,/g, '');
+    const match = cleaned.match(/-?(?:\d+\.\d+|\.\d+|\d+)/);
+    return match ? parseFloat(match[0]) : NaN;
+  }
+
+  function resolveDisplayFormatType(typeName) {
+    const key = String(typeName || '').trim().toLowerCase();
+    if (!key) return null;
+    if (metricRegistry[key]) return metricRegistry[key].type;
+    if (/(revenue|sales|order|transaction|aov|cart|price)/i.test(key)) return 'currency';
+    if (/(rate|ratio|conversion|bounce|engagement|attractiveness|activity|exposure|click)/i.test(key)) return 'percent';
+    if (/(time|duration|seconds?)/i.test(key)) return 'time';
+    return null;
+  }
+
+  function applyAutoSuffix(text, formatType) {
+    const raw = String(text || '');
+    if (!formatType || !/\d/.test(raw)) return raw;
+    if (formatType === 'percent') {
+      const parsed = parseNumericFromDisplayValue(raw);
+      return Number.isFinite(parsed) ? `${parsed.toFixed(2)}%` : raw;
+    }
+    if (formatType === 'currency') {
+      const parsed = parseNumericFromDisplayValue(raw);
+      return Number.isFinite(parsed)
+        ? `$${parsed.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : raw;
+    }
+    if (formatType === 'time') {
+      const parsed = parseNumericFromDisplayValue(raw);
+      return Number.isFinite(parsed) ? `${parsed.toFixed(2)}s` : raw;
+    }
+    return raw;
+  }
+
   function isExposureRateMetric(metricTypeName) {
     return /(^|\s)exposure\s+rate(\s|$)/i.test(String(metricTypeName || '').trim());
   }
@@ -3505,7 +3541,15 @@
     const activeMetricForPane = getActiveMetricForZone(zoneKey);
     const csTypeNameForState = activeMetricForPane || editorState.csMetricTypeName || '';
     const csTypeName = isMetricTypeCompatible(currentMetric, csTypeNameForState) ? csTypeNameForState : '';
-    
+
+    // ── DISPLAY VALUE <-> NUMERIC VALUE SYNC (manual zones only) ──
+    const displayFormatType = isHeatmapPointEditor ? null : resolveDisplayFormatType(csTypeName);
+    const parsedFromDisplay = parseNumericFromDisplayValue(currentMetric);
+    const numericMatchesDisplay = !hasOverride
+      || !Number.isFinite(parsedFromDisplay)
+      || Math.abs(parsedFromDisplay - Number(currentValue)) < 0.05;
+    const initialMatchChecked = !isHeatmapPointEditor && numericMatchesDisplay;
+
     let existingZoneName = editorState.zoneName || '';
     if (!existingZoneName && !hasOverride) {
       existingZoneName = generateDefaultZoneName(editorState.origMetric, csTypeNameForState, paneSide);
@@ -3519,7 +3563,9 @@
     const objectHint = isHeatmapPointEditor ? '(label for heatmap point list)' : '(label for overrides list)';
     const displayValueHint = isHeatmapPointEditor
       ? 'Use any format: 52.8%, 1,240, 3.2s. This is the marker text shown on the heatmap.'
-      : 'Use any format: 52.8%, $1,240, 3.2s. This does not change the color target.';
+      : (displayFormatType
+          ? 'Enter just the number — the correct % / $ / s formatting is applied automatically.'
+          : 'Use any format: 52.8%, $1,240, 3.2s.');
     const colorTargetLabel = isHeatmapPointEditor ? 'Color Intensity Target' : 'Color Target';
     const numericLabel = isHeatmapPointEditor
       ? (heatmapLayer === 'clicks' ? 'Click Volume' : 'Numeric Intensity')
@@ -3711,6 +3757,32 @@
         color: #aaa;
         margin-top: 3px;
       }
+      .field-sync-toggle {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin: -2px 0 14px;
+      }
+      .field-sync-toggle input[type="checkbox"] {
+        margin: 2px 0 0;
+        width: auto;
+        flex: 0 0 auto;
+        cursor: pointer;
+      }
+      .field-sync-toggle .checkbox-copy {
+        display: flex;
+        flex-direction: column;
+      }
+      .field-sync-toggle .checkbox-label {
+        font-size: 12px;
+        font-weight: 600;
+        color: #333;
+        cursor: pointer;
+      }
+      .field.field-disabled {
+        opacity: 0.45;
+        pointer-events: none;
+      }
       .color-preview {
         display: inline-block;
         width: 14px;
@@ -3834,10 +3906,17 @@
         </div>
         <div class="field">
           <label>Display Value <span class="hint">(text shown on zone)</span></label>
-          <input id="inp-metric" type="text" value="${currentMetric}" placeholder="e.g. 52.8%">
+          <input id="inp-metric" type="text" value="${currentMetric}" placeholder="e.g. 52.8">
           <div class="hint">${displayValueHint}</div>
         </div>
-        <div class="field">
+        <div class="field field-sync-toggle">
+          <input type="checkbox" id="chk-match-value" ${initialMatchChecked ? 'checked' : ''}>
+          <span class="checkbox-copy">
+            <label class="checkbox-label" for="chk-match-value">Match display value to numeric value</label>
+            <span class="hint">When on, Color Target and Numeric Value are derived from Display Value.</span>
+          </span>
+        </div>
+        <div class="field" id="field-color-target">
           <label>${colorTargetLabel} <span class="hint">(exact range positions)</span></label>
           <div class="preset-grid">
             <button class="preset-btn" type="button" data-target-pct="0">Low</button>
@@ -3857,7 +3936,7 @@
           </div>
           <div class="hint">Maps directly to this pane's min/max range.</div>
         </div>
-        <div class="field field-advanced">
+        <div class="field field-advanced" id="field-numeric-value">
           <label>
             ${numericLabel} <span class="hint">(advanced manual override)</span>
             <span class="color-preview" id="color-preview"></span>
@@ -3977,6 +4056,8 @@
       event.preventDefault();
     });
 
+    let normalizeDisplayValueSuffix = () => {};
+
     if (!isHeatmapPointEditor) {
       const limitMin = Number(editorState.limitMin ?? 0);
       const limitMax = Number(editorState.limitMax ?? 100);
@@ -4045,6 +4126,45 @@
           setNumericFromTargetPercent(Number(button.dataset.targetPct));
         });
       });
+
+      // ── DISPLAY VALUE <-> NUMERIC VALUE SYNC ──
+      const matchCheckbox = shadow.getElementById('chk-match-value');
+      const colorTargetField = shadow.getElementById('field-color-target');
+      const numericValueField = shadow.getElementById('field-numeric-value');
+
+      function setSyncControlsDisabled(isDisabled) {
+        [targetSlider, valueInput].forEach(input => { if (input) input.disabled = isDisabled; });
+        presetButtons.forEach(button => { button.disabled = isDisabled; });
+        if (colorTargetField) colorTargetField.classList.toggle('field-disabled', isDisabled);
+        if (numericValueField) numericValueField.classList.toggle('field-disabled', isDisabled);
+      }
+
+      function syncNumericFromDisplayValue() {
+        const parsed = parseNumericFromDisplayValue(metricInput.value);
+        if (!Number.isFinite(parsed)) return; // keep last valid numeric/color while text has no number
+        valueInput.value = parsed.toFixed(2);
+        syncTargetUiFromNumeric(parsed);
+      }
+
+      normalizeDisplayValueSuffix = () => {
+        const next = applyAutoSuffix(metricInput.value, displayFormatType);
+        if (next === metricInput.value) return;
+        metricInput.value = next;
+        if (matchCheckbox.checked) syncNumericFromDisplayValue();
+      };
+
+      normalizeDisplayValueSuffix();
+      setSyncControlsDisabled(matchCheckbox.checked);
+      if (matchCheckbox.checked) syncNumericFromDisplayValue();
+
+      matchCheckbox.addEventListener('change', () => {
+        setSyncControlsDisabled(matchCheckbox.checked);
+        if (matchCheckbox.checked) syncNumericFromDisplayValue();
+      });
+      metricInput.addEventListener('input', () => {
+        if (matchCheckbox.checked) syncNumericFromDisplayValue();
+      });
+      metricInput.addEventListener('blur', normalizeDisplayValueSuffix);
     }
 
     closeButton.addEventListener('click', closePopover);
@@ -4083,6 +4203,7 @@
         return;
       }
 
+      normalizeDisplayValueSuffix();
       const metric = metricInput.value.trim();
       const value = parseFloat(valueInput.value);
       const zoneName = zoneNameInput?.value?.trim() || '';
@@ -4128,6 +4249,7 @@
             return;
           }
 
+          normalizeDisplayValueSuffix();
           const metric = metricInput.value.trim();
           const value = parseFloat(valueInput.value);
           const zoneName = zoneNameInput?.value?.trim() || '';
@@ -5100,8 +5222,8 @@
       const isDecimal = (/[\.,]\d/.test(existing) && !isCurrency && !isPercentage && !isTime) || /(recurrence|average|per session|per user)/i.test(name);
 
       if (isCurrency) return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-      if (isPercentage) return `${val.toFixed(1)}%`;
-      if (isTime) return `${val.toFixed(1)}s`;
+      if (isPercentage) return `${val.toFixed(2)}%`;
+      if (isTime) return `${val.toFixed(2)}s`;
       if (isDecimal) return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       return Math.round(val).toLocaleString('en-US');
     };
@@ -5256,10 +5378,10 @@
           let display;
           if (m.type === "currency") {
             display = `$${val.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-          } else if (m.type === "percent" || m.type === "percent_long") {
-            display = `${val.toFixed(m.type === "percent" ? 1 : 2)}%`;
+          } else if (m.type === "percent") {
+            display = `${val.toFixed(2)}%`;
           } else if (m.type === "time") {
-            display = `${val.toFixed(1)}s`;
+            display = `${val.toFixed(2)}s`;
           } else if (m.type === "decimal") {
             display = val.toFixed(2);
           } else {
