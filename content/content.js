@@ -3013,6 +3013,12 @@
     return /(^|\s)exposure\s+rate(\s|$)/i.test(String(metricTypeName || '').trim());
   }
 
+  // Exposure Rate/Time are pure functions of scroll depth — no legitimate
+  // per-element variance, unlike Blank Rate/Click Rate/etc.
+  function isDepthOnlyMetric(metricTypeName) {
+    return /(^|\s)exposure\s+(rate|time)(\s|$)/i.test(String(metricTypeName || '').trim());
+  }
+
   function formatPercent(value, decimals = 1) {
     const n = Number(value);
     if (!Number.isFinite(n)) return '0.0%';
@@ -5256,18 +5262,28 @@
           modeSuffix = isRightPane ? ' - Compare (Right Pane)' : ' - Compare (Left Pane)';
       }
 
+      // Position ratio is based on actual vertical depth, not sort rank —
+      // zones at the same y must land on the same base ratio.
+      const groupYs = group.map(z => z.y).filter(Number.isFinite);
+      const paneMinY = groupYs.length ? Math.min(...groupYs) : 0;
+      const paneMaxY = groupYs.length ? Math.max(...groupYs) : 0;
+      const paneYSpan = paneMaxY - paneMinY;
+
       group.forEach((row, index) => {
         if (!row.zoneKey) return;
         const targetMetricName = getActiveMetricForZone(row.zoneKey) || currentMetricName;
+        const isDepthOnly = isDepthOnlyMetric(targetMetricName);
 
         let numericValue = pMax;
         if (trueRandom) {
           // Absolute Chaos: Pick a random number between Min and Max
           numericValue = pMin + Math.random() * (pMax - pMin);
         } else if (totalEligible > 1) {
-          const ratio = index / (totalEligible - 1);
-          // Apply SC's selected random noise
-          const noise = (Math.random() - 0.5) * jitter;
+          const ratio = (paneYSpan > 0 && Number.isFinite(row.y))
+            ? (row.y - paneMinY) / paneYSpan
+            : index / (totalEligible - 1);
+          // Exposure Rate/Time are pure depth functions — no per-element noise.
+          const noise = isDepthOnly ? 0 : (Math.random() - 0.5) * jitter;
           const noisyRatio = Math.min(Math.max(ratio + noise, 0), 1);
           numericValue = pMax - (noisyRatio * (pMax - pMin));
         }
@@ -5350,8 +5366,10 @@
     });
 
     metricsLibrary.forEach(m => {
+      const isDepthOnly = isDepthOnlyMetric(m.name);
+
       Object.keys(panes).forEach((pKey) => {
-        const paneZones = panes[pKey].sort((a, b) => a.y - b.y); 
+        const paneZones = panes[pKey].sort((a, b) => a.y - b.y);
 
         // Pane-Aware Variance: Identify right pane by key
         const isRightPane = pKey.includes('right');
@@ -5365,15 +5383,24 @@
             modeSuffix = isRightPane ? ' - Compare (Right Pane)' : ' - Compare (Left Pane)';
         }
 
+        // Position ratio is based on actual vertical depth, not sort rank —
+        // zones at the same y must land on the same base ratio.
+        const paneYs = paneZones.map(z => z.y).filter(Number.isFinite);
+        const paneMinY = paneYs.length ? Math.min(...paneYs) : 0;
+        const paneMaxY = paneYs.length ? Math.max(...paneYs) : 0;
+        const paneYSpan = paneMaxY - paneMinY;
+
         paneZones.forEach((row, index) => {
           let val = pMax;
           if (trueRandom) {
             // Absolute Chaos
             val = pMin + Math.random() * (pMax - pMin);
           } else if (paneZones.length > 1) {
-            const ratio = index / (paneZones.length - 1);
-            // Apply SC's selected random noise
-            const noise = (Math.random() - 0.5) * jitter;
+            const ratio = (paneYSpan > 0 && Number.isFinite(row.y))
+              ? (row.y - paneMinY) / paneYSpan
+              : index / (paneZones.length - 1);
+            // Exposure Rate/Time are pure depth functions — no per-element noise.
+            const noise = isDepthOnly ? 0 : (Math.random() - 0.5) * jitter;
             const noisyRatio = Math.min(Math.max(ratio + noise, 0), 1);
             val = pMax - (noisyRatio * (pMax - pMin));
           }
