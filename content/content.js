@@ -573,13 +573,6 @@
     return `hsla(${(1 - s) * 220}, 100%, 50%, 0.5)`;
   }
 
-  function parseNumericMetric(rawValue) {
-    if (rawValue === null || rawValue === undefined) return NaN;
-    if (typeof rawValue === 'number') return rawValue;
-    const cleaned = String(rawValue).replace(/,/g, '.').replace(/[^\d.-]/g, '');
-    return cleaned ? Number(cleaned) : NaN;
-  }
-
   // Finds zoning elements across document, open shadow roots, and same-origin iframes.
   function collectZoneElementsFromRoot(root, out) {
     if (!root) return;
@@ -3211,14 +3204,24 @@
       }
     }
 
+    // Prefer the known synthetic metric's own range — sidesteps scale
+    // contamination from unrelated metrics entirely for anything we generate.
+    const zoneKey = getZoneKey(el);
+    const activeMetricName = getActiveMetricForZone(zoneKey);
+    const registryEntry = activeMetricName ? metricRegistry[activeMetricName.toLowerCase().trim()] : null;
+    if (registryEntry) {
+      return { limitMin: registryEntry.min, limitMax: registryEntry.max };
+    }
+
     const paneKey = getPaneKey(el);
     const paneValues = getAllZoneElements()
       .filter(zoneEl => getPaneKey(zoneEl) === paneKey)
       .map(zoneEl => {
-        const attrValue = parseNumericMetric(zoneEl.getAttribute('value'));
-        return Number.isFinite(attrValue)
-          ? attrValue
-          : parseNumericMetric(zoneEl.getAttribute('metric'));
+        // Only trust a sibling's value if it actually has an override for the
+        // SAME metric currently being viewed — otherwise its raw `value`
+        // attribute may be leftover data from an unrelated metric/native scale.
+        const siblingValue = getOverrideForElement(zoneEl)?.override?.value;
+        return Number.isFinite(Number(siblingValue)) ? Number(siblingValue) : NaN;
       })
       .filter(Number.isFinite);
 
