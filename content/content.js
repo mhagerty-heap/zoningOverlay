@@ -52,7 +52,7 @@
   const CS_FORCE_CONTEXT = true;
   const CS_DEFAULT_LOG_MODE = 'off'; // 'trace' | 'all' | 'off'
   const CS_ENABLE_HEATMAP_INTERACTIONS = true;
-  const CS_EXPOSURE_FLAT_TOP_PX = 420; // ~4.4in — Exposure Rate/Time stay pinned at max within this band of the pane top
+  const CS_EXPOSURE_FLAT_TOP_PX = 600; // ~6.25in — Exposure Rate/Time stay pinned at max within this band of the pane top
   const CS_TRACE_LOG_PREFIXES = [
     'Intercepted zone click',
     'Opening top-frame editor for',
@@ -2861,19 +2861,30 @@
       .trim();
   }
 
-  let csActiveMetrics = { left: "", right: "", global: "" };
+  let csActiveMetrics = { byPane: {}, left: "", right: "", global: "" };
   let isCompareMode = false;
 
   function getActiveMetricForZone(zoneKey) {
     if (!isCompareMode) return (csMetricTypeName || "").toLowerCase();
-    
-    // BULLETPROOF: If the Top Frame whispered our identity, use it!
+
+    // PREFERRED: containment-based match. The zone's own pane key (its
+    // closest zn-snapshot-header/app-zonings ancestor, ranked the exact
+    // same way for triggers and zones) was already recorded by
+    // readCsMetricTypeName — no independent sorting or cross-frame
+    // whisper needed when both live in the same document.
+    const sepIdx = zoneKey ? zoneKey.indexOf('::') : -1;
+    const panePortion = sepIdx >= 0 ? zoneKey.slice(0, sepIdx) : zoneKey;
+    if (panePortion && csActiveMetrics.byPane[panePortion]) {
+      return csActiveMetrics.byPane[panePortion];
+    }
+
+    // FALLBACK: legacy cross-frame whisper, for panes that are genuinely
+    // separate iframes with no shared document/ancestor to key off.
     if (window.__csDemoPaneSide === 'right') return csActiveMetrics.right;
     if (window.__csDemoPaneSide === 'left') return csActiveMetrics.left;
-    
-    // Fallback for Top Frame zones
-    return (zoneKey && (zoneKey.includes('cmp-side:right') || zoneKey.includes('side:right'))) 
-      ? csActiveMetrics.right 
+
+    return (zoneKey && (zoneKey.includes('cmp-side:right') || zoneKey.includes('side:right')))
+      ? csActiveMetrics.right
       : csActiveMetrics.left;
   }
 
@@ -2883,36 +2894,48 @@
     try {
       const triggers = getAllElementsBySelector('.metric-selector-trigger, [data-testid*="metric-selector"], [data-testid="analysis-mode-selector"], .form-analysis-label');
       const visibleTriggers = [];
-      
+
       for (const t of triggers) {
         const span = t.querySelector('span') || t;
         const text = span.textContent?.trim()?.toLowerCase() || "";
         const rect = t.getBoundingClientRect();
-        
+
         if (text && text !== 'select metric' && rect.width > 0 && rect.height > 0) {
-          visibleTriggers.push({ text, rect });
+          visibleTriggers.push({ text, rect, trigger: t });
         }
       }
 
       let changed = false;
-      let newMetrics = { left: "", right: "", global: "" };
+      let newMetrics = { byPane: {}, left: "", right: "", global: "" };
       let newCompareMode = visibleTriggers.length > 1;
 
       if (newCompareMode) {
+        // PREFERRED: correlate each trigger to its own pane by DOM
+        // containment (nearest zn-snapshot-header/app-zonings ancestor),
+        // ranked identically to how getPaneKey ranks it for zones. This
+        // works whenever the trigger and its zones share a document —
+        // no independent sorting or cross-frame whisper required.
+        visibleTriggers.forEach(({ text, trigger }) => {
+          const paneKey = getPaneKey(trigger);
+          if (paneKey) newMetrics.byPane[paneKey] = text;
+        });
+
         visibleTriggers.sort((a, b) => a.rect.left - b.rect.left);
         newMetrics.left = visibleTriggers[0].text;
         newMetrics.right = visibleTriggers[visibleTriggers.length - 1].text;
-        newMetrics.global = newMetrics.left; 
+        newMetrics.global = newMetrics.left;
 
-        // BULLETPROOF WHISPER: Pierce the shadow DOM to find the massive compare iframes!
+        // FALLBACK WHISPER: for genuinely separate per-pane iframes (no
+        // shared document with the trigger), pierce the shadow DOM to
+        // find the massive compare iframes and tell each one its side.
         const iframes = getAllElementsByTag('iframe').filter(f => {
-           try { 
+           try {
              const r = f.getBoundingClientRect();
              // Filter out tiny hidden tracking iframes. Compare iframes are massive.
-             return r.width > window.innerWidth * 0.25; 
+             return r.width > window.innerWidth * 0.25;
            } catch(e) { return false; }
         });
-        
+
         iframes.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
         if (iframes.length >= 2) {
            iframes[0].contentWindow?.postMessage({ __csDemoPaneSide: 'left' }, 'https://snapshot.contentsquare.com');
@@ -2925,9 +2948,10 @@
         newMetrics.right = visibleTriggers[0].text;
       }
 
-      if (newMetrics.left !== csActiveMetrics.left || 
-          newMetrics.right !== csActiveMetrics.right || 
-          newMetrics.global !== csActiveMetrics.global || 
+      if (JSON.stringify(newMetrics.byPane) !== JSON.stringify(csActiveMetrics.byPane) ||
+          newMetrics.left !== csActiveMetrics.left ||
+          newMetrics.right !== csActiveMetrics.right ||
+          newMetrics.global !== csActiveMetrics.global ||
           isCompareMode !== newCompareMode) {
           changed = true;
       }
