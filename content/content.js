@@ -5416,7 +5416,7 @@
             metric: displayMetric,
             value: numericValue,
             origMetric: '—',
-            zoneName: `${targetMetricName} Bulk${modeSuffix}`,
+            zoneName: `${targetMetricName} Single Metric${modeSuffix}`,
             csMetricTypeName: targetMetricName,
             limitMin: pMin,
             limitMax: pMax
@@ -5554,7 +5554,7 @@
               metric: display,
               value: val,
               origMetric: '—',
-              zoneName: `${m.name} Data${modeSuffix}`,
+              zoneName: `${m.name} All Metrics${modeSuffix}`,
               csMetricTypeName: m.name,
               limitMin: pMin,
               limitMax: pMax
@@ -5638,9 +5638,12 @@
       
       /* Internal Zoning Tabs */
       .tab-nav { display: flex; border-bottom: 1px solid #ececf6; margin-bottom: 12px; margin-top: 4px; }
-      .tab-btn { flex: 1; background: none; border: none; padding: 8px 4px; font-size: 10px; font-weight: 700; color: #888; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; text-transform: uppercase; }
+      .tab-btn { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; background: none; border: none; padding: 8px 4px; color: #888; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
       .tab-btn:hover { color: #2c2c8c; background: #fafafe; }
       .tab-btn.active { color: #2c2c8c; border-bottom: 2px solid #2c2c8c; }
+      .tab-btn-main { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.2px; white-space: nowrap; }
+      .tab-btn-sub { font-size: 8px; font-weight: 600; color: #aaa; text-transform: uppercase; letter-spacing: 0.2px; }
+      .tab-btn.active .tab-btn-sub { color: #7a7ac9; }
       .inner-tab-pane { display: none; }
       .inner-tab-pane.active { display: block; }
       
@@ -5711,25 +5714,18 @@
           </div>
 
           <div class="tab-nav">
-            <button class="tab-btn active" data-target="pane-bulk" ${isEditing ? '' : 'disabled'}>Bulk Fill</button>
-            <button class="tab-btn" data-target="pane-nuclear" ${isEditing ? '' : 'disabled'}>360° Data</button>
-            <button class="tab-btn" data-target="pane-exposure" ${isEditing ? '' : 'disabled'}>Exposure</button>
+            <button class="tab-btn active" data-target="pane-nuclear" ${isEditing ? '' : 'disabled'}>
+              <span class="tab-btn-main">All Metrics</span><span class="tab-btn-sub">All Panes</span>
+            </button>
+            <button class="tab-btn" data-target="pane-bulk" ${isEditing ? '' : 'disabled'}>
+              <span class="tab-btn-main">Single Metric</span><span class="tab-btn-sub">Single Pane</span>
+            </button>
+            <button class="tab-btn" data-target="pane-exposure" ${isEditing ? '' : 'disabled'}>
+              <span class="tab-btn-main">Exposure</span>
+            </button>
           </div>
 
-          <div id="pane-bulk" class="inner-tab-pane active">
-            <div class="row">
-              <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max (e.g. 15)" ${isEditing ? '' : 'disabled'}>
-              <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min (e.g. 1)" ${isEditing ? '' : 'disabled'}>
-            </div>
-            <div class="chk-row" style="margin-bottom: 12px;">
-              <label style="display:flex;align-items:center;cursor:pointer;">
-                <input type="checkbox" id="chk-bulk-overwrite" ${isEditing ? '' : 'disabled'}> Overwrite existing native data (>0)
-              </label>
-            </div>
-            <button class="btn btn-apply" id="btn-bulk-fill" ${isEditing ? '' : 'disabled'}>Fill Zeros for Current Metric</button>
-          </div>
-
-          <div id="pane-nuclear" class="inner-tab-pane">
+          <div id="pane-nuclear" class="inner-tab-pane active">
             <div class="metric-tuner-list">
               <div class="tuner-row" style="position: sticky; top: 0; background: #fff; z-index: 1; padding-bottom: 2px;">
                 <div class="section-label" style="margin:0">Metric</div><div class="section-label" style="margin:0; text-align:center;">Min</div><div class="section-label" style="margin:0; text-align:center;">Max</div>
@@ -5756,6 +5752,19 @@
               </label>
             </div>
             <button class="btn btn-apply" id="btn-nuclear-fill" style="background: #cc3333;" ${isEditing ? '' : 'disabled'}>🚀 Generate All Data</button>
+          </div>
+
+          <div id="pane-bulk" class="inner-tab-pane">
+            <div class="row">
+              <input id="inp-bulk-max" class="inp" type="number" step="0.1" placeholder="Max (e.g. 15)" ${isEditing ? '' : 'disabled'}>
+              <input id="inp-bulk-min" class="inp" type="number" step="0.1" placeholder="Min (e.g. 1)" ${isEditing ? '' : 'disabled'}>
+            </div>
+            <div class="chk-row" style="margin-bottom: 12px;">
+              <label style="display:flex;align-items:center;cursor:pointer;">
+                <input type="checkbox" id="chk-bulk-overwrite" ${isEditing ? '' : 'disabled'}> Overwrite existing native data (>0)
+              </label>
+            </div>
+            <button class="btn btn-apply" id="btn-bulk-fill" ${isEditing ? '' : 'disabled'}>Fill Zeros for Current Metric</button>
           </div>
 
           <div id="pane-exposure" class="inner-tab-pane">
