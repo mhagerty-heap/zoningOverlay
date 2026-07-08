@@ -4,7 +4,7 @@ A Chrome extension designed for PreSales and Solution Consulting teams to easily
 
 ## Features
 
-* **Live Editing**: Click on any zone in the Zoning module to instantly change its metric value and display text.
+* **Live Editing**: Click on any zone in the Zoning module to instantly change its metric value and display text. A "Match display value to numeric value" option (on by default) keeps the color-driving numeric value in sync with whatever you type, and the display value auto-formats with the right %, $, or s suffix based on the metric — no need to type it yourself.
 * **Color Matching**: Automatically updates the zone's background color gradient to match the new value.
 * **Heatmap Point Mocking**: Shift + Click anywhere on the page to drop custom heatmap points (clicks, hovers, etc.).
 * **Journey Analysis Manipulation**: Rename nodes and alter traffic distribution percentages in Sunburst charts to build the perfect "Golden Path" narrative.
@@ -34,8 +34,8 @@ Click the **"Advanced"** button in the toolbar to access bulk operations and Jou
 **⚠️ Important:** The "Edit Zones" toggle must be turned **ON** to unlock and use these features.
 
 #### The Zoning Tab
-* **1. Bulk Fill Current Metric**: Instantly populate all un-edited zones on the screen with data for the metric you are currently viewing. You can choose to overwrite existing native data (>0) or only fill the blanks. Data is scaled between your chosen Min and Max values.
-* **2. Global Metric Library (360° Data Generation)**: The ultimate demo builder. Set Min/Max bounds for *every* metric in the library (Revenue, Click Rate, Attractiveness, Time, etc.). Clicking **🚀 Generate All Data** injects tailored data for every single metric into all visible zones simultaneously. 
+* **1. Bulk Fill Current Metric**: Instantly populate all un-edited zones on the screen with data for the metric you are currently viewing. You can choose to overwrite existing native data (>0) or only fill the blanks. Data is scaled between your chosen Min and Max values. This is intended for single-screen use — it does not apply the Right Pane Variance used by 360° Data below.
+* **2. Global Metric Library (360° Data Generation)**: The ultimate demo builder. Set Min/Max bounds for *every* metric in the library (Revenue, Click Rate, Attractiveness, Time, etc.). Clicking **🚀 Generate All Data** injects tailored data for every single metric into all visible zones simultaneously. Exposure Rate and Exposure Time realistically stay near their max value for the top portion of the page (since nearly everyone scrolls that far) before decaying further down. In Compare Mode, use **Right Pane Variance** to control how much lower (or, with a negative number, higher) the right pane's values run compared to the left — set it to 0 for a neutral, unbiased comparison.
 * **3. Exposure Auto-Seed Bounds**: Quickly build a realistic "scroll depth" narrative. Defines a Top % and Bottom % for exposure. Zones above the fold are automatically assigned the Top %, and zones below the fold gradually decrease toward the Bottom %.
 
 #### The Journeys Tab
@@ -56,3 +56,4 @@ Click the **"Advanced"** button in the toolbar to access bulk operations and Jou
 * The "Edit Zones" toggle must be turned **ON** to unlock and use features.
 * **Journey Chart Updates**: When applying size/percentage rules to Journey Analysis, you must trigger a "soft reload" (like toggling the date range in the UI) for the chart's structural math to fetch and update. Text renaming will happen automatically.
 * Data generated in Compare Mode is strictly tied to the split-screen view. Your edits will not carry over if you toggle back to a single screen (and vice versa)!
+* Compare Mode (split-screen) is fully supported for both Bulk Fill and 360° Data Generation — each pane independently and correctly reflects its own selected metric or segment.
