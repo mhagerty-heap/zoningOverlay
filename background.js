@@ -187,6 +187,39 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'requestPaneSideAssignment') {
+    // Tell each compare-pane iframe which side it's on via chrome.tabs.sendMessage
+    // targeted at its exact frameId — an extension-privileged channel, unlike
+    // window.name/postMessage which page-level cross-origin policies (e.g. COOP)
+    // can silently block. chrome.webNavigation gives real frame topology
+    // (parentFrameId) instead of guessing from DOM geometry, which content
+    // scripts can't do across the cross-origin boundary anyway.
+    const tabId = sender.tab.id;
+    chrome.webNavigation.getAllFrames({ tabId }).then(frames => {
+      const candidates = (frames || [])
+        .filter(f => f.parentFrameId === 0 && f.frameId !== 0 && /snapshot\.contentsquare\.com/i.test(f.url || ''))
+        .sort((a, b) => a.frameId - b.frameId);
+
+      if (candidates.length < 2) {
+        sendResponse({ ok: false, reason: 'fewer than 2 candidate pane frames found', candidateCount: candidates.length });
+        return;
+      }
+
+      const leftFrameId = candidates[0].frameId;
+      const rightFrameId = candidates[candidates.length - 1].frameId;
+
+      Promise.all([
+        chrome.tabs.sendMessage(tabId, { type: 'assignPaneSide', side: 'left' }, { frameId: leftFrameId }).catch(() => null),
+        chrome.tabs.sendMessage(tabId, { type: 'assignPaneSide', side: 'right' }, { frameId: rightFrameId }).catch(() => null)
+      ]).then(() => {
+        sendResponse({ ok: true, leftFrameId, rightFrameId, candidateCount: candidates.length });
+      });
+    }).catch(error => {
+      sendResponse({ ok: false, error: error?.message || String(error) });
+    });
+    return true;
+  }
+
   if (msg.type === 'insertEditCSS') {
     chrome.scripting.insertCSS({
       target: { tabId: sender.tab.id },

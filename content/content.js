@@ -617,6 +617,32 @@
     return Array.from(seen).filter(el => !!el && el.isConnected);
   }
 
+  // A slow-rendering pane (e.g. the right-side compare iframe, known
+  // elsewhere in this file to take up to ~1.5s to fully render) can sit at a
+  // handful of zones for a while before the real batch arrives all at once.
+  // A short "stops changing" check can't tell that apart from "actually
+  // done" — it'll falsely conclude done during the lull. So enforce a
+  // minimum wait floor past that known danger window before stability is
+  // even allowed to end the wait, then require the count to hold steady.
+  async function waitForStableZoneCount(minWaitMs = 1700, maxWaitMs = 3000, pollIntervalMs = 150, stableChecksNeeded = 2) {
+    const start = Date.now();
+    let zones = getCandidateZoneElements();
+    let stableStreak = 0;
+    let previousCount = zones.length;
+    while (Date.now() - start < maxWaitMs) {
+      await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+      zones = getCandidateZoneElements();
+      if (zones.length === previousCount) {
+        stableStreak++;
+      } else {
+        stableStreak = 0;
+        previousCount = zones.length;
+      }
+      if (Date.now() - start >= minWaitMs && stableStreak >= stableChecksNeeded) break;
+    }
+    return zones;
+  }
+
   // Collects any tag across document, open shadow roots, and same-origin iframes.
   function collectElementsByTagFromRoot(root, tagName, out) {
     if (!root || !tagName) return;
@@ -2463,6 +2489,26 @@
     el.style.outlineOffset = '';
   }
 
+  // PRIMARY: delivered via chrome.tabs.sendMessage targeted at this exact
+  // frameId (see background.js's 'requestPaneSideAssignment' handler) — an
+  // extension-privileged channel, not subject to the page-level cross-origin
+  // restrictions (e.g. COOP) that silently swallow window.name writes and
+  // postMessage deliveries in some environments. Confirmed by direct testing
+  // that both of those page-level channels can fail with zero indication.
+  let csAssignedPaneSide = null;
+
+  // window.name / postMessage kept as legacy fallbacks in case some other
+  // page architecture doesn't block them the way this one does.
+  const CS_PANE_SIDE_NAME_PREFIX = 'csDemoPaneSide:';
+  function getWhisperedPaneSide() {
+    if (csAssignedPaneSide) return csAssignedPaneSide;
+    const fromName = String(window.name || '');
+    if (fromName.startsWith(CS_PANE_SIDE_NAME_PREFIX)) {
+      return fromName.slice(CS_PANE_SIDE_NAME_PREFIX.length);
+    }
+    return window.__csDemoPaneSide || null;
+  }
+
   function getPaneKey(el) {
     const getElementFrameScope = node => {
       const doc = node?.ownerDocument || document;
@@ -2501,8 +2547,9 @@
     // Always determine side by comparing the pane's bounding rect to the viewport center
     const getHorizontalSide = rect => {
       // PRO FIX: If the Top Frame told us who we are, believe it!
-      if (window.__csDemoPaneSide) return window.__csDemoPaneSide;
-      
+      const whisperedSide = getWhisperedPaneSide();
+      if (whisperedSide) return whisperedSide;
+
       if (!rect) return 'left';
       // Use only the current window's innerWidth to avoid cross-origin errors
       const viewportCenter = window.innerWidth / 2;
@@ -2612,7 +2659,23 @@
       if (idx >= 0) return withFrameScope(withCompareSide(`scroll:${idx}`), scrollContainer);
     }
 
-    // Fallback for unexpected DOM layouts: segment by horizontal position.
+    // Fallback for unexpected DOM layouts. If we're already inside a
+    // distinct frame (a separate document from top), that frame IS the
+    // pane — don't additionally re-split its own zones by intra-frame
+    // horizontal position, which would mistake a page's own left/right
+    // column layout (e.g. an order-summary sidebar) for a second compare
+    // pane. Only geometrically split when still in the same top document
+    // (a genuine same-page split view with no frame boundary at all).
+    const frameScope = getElementFrameScope(el);
+    if (frameScope !== 'top') {
+      // Two sibling widgets rendering the same underlying page (same
+      // zoneIds) would otherwise compute an identical frameScope (same
+      // origin/path, empty window.name) and collide on the exact same
+      // override storage key. Append the reliable per-widget side signal
+      // when available so they stay genuinely distinct.
+      const whisperedSide = getWhisperedPaneSide();
+      return whisperedSide ? `${frameScope}|side:${whisperedSide}` : frameScope;
+    }
     const rect = el.getBoundingClientRect();
     const side = getHorizontalSide(rect);
     return withFrameScope(withCompareSide(`side:${side}`), el);
@@ -2878,14 +2941,14 @@
       return csActiveMetrics.byPane[panePortion];
     }
 
-    // FALLBACK: legacy cross-frame whisper, for panes that are genuinely
-    // separate iframes with no shared document/ancestor to key off.
-    if (window.__csDemoPaneSide === 'right') return csActiveMetrics.right;
-    if (window.__csDemoPaneSide === 'left') return csActiveMetrics.left;
+    // FALLBACK: cross-frame whisper, for panes that are genuinely separate
+    // iframes with no shared document/ancestor to key off.
+    const whisperedSide = getWhisperedPaneSide();
+    if (whisperedSide === 'right') return csActiveMetrics.right;
+    if (whisperedSide === 'left') return csActiveMetrics.left;
 
-    return (zoneKey && (zoneKey.includes('cmp-side:right') || zoneKey.includes('side:right')))
-      ? csActiveMetrics.right
-      : csActiveMetrics.left;
+    const isRightFallback = zoneKey && (zoneKey.includes('cmp-side:right') || zoneKey.includes('side:right'));
+    return isRightFallback ? csActiveMetrics.right : csActiveMetrics.left;
   }
 
   function readCsMetricTypeName(forceShout = false) {
@@ -2925,9 +2988,17 @@
         newMetrics.right = visibleTriggers[visibleTriggers.length - 1].text;
         newMetrics.global = newMetrics.left;
 
-        // FALLBACK WHISPER: for genuinely separate per-pane iframes (no
-        // shared document with the trigger), pierce the shadow DOM to
-        // find the massive compare iframes and tell each one its side.
+        // PRIMARY: ask the background script to assign sides via
+        // chrome.tabs.sendMessage targeted at each frame's real frameId.
+        // Background resolves frame topology via chrome.webNavigation (not
+        // DOM inspection), and this transport is an extension-privileged
+        // channel — not subject to the page-level cross-origin restrictions
+        // that silently swallow window.name writes and postMessage
+        // deliveries in some environments (confirmed by direct testing).
+        chrome.runtime.sendMessage({ type: 'requestPaneSideAssignment' }, () => { void chrome.runtime.lastError; });
+
+        // FALLBACK WHISPER: legacy page-level channels, best-effort only,
+        // for architectures where they aren't blocked.
         const iframes = getAllElementsByTag('iframe').filter(f => {
            try {
              const r = f.getBoundingClientRect();
@@ -2938,8 +3009,12 @@
 
         iframes.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
         if (iframes.length >= 2) {
-           iframes[0].contentWindow?.postMessage({ __csDemoPaneSide: 'left' }, 'https://snapshot.contentsquare.com');
-           iframes[iframes.length - 1].contentWindow?.postMessage({ __csDemoPaneSide: 'right' }, 'https://snapshot.contentsquare.com');
+           const leftWin = iframes[0].contentWindow;
+           const rightWin = iframes[iframes.length - 1].contentWindow;
+           try { if (leftWin) leftWin.name = `${CS_PANE_SIDE_NAME_PREFIX}left`; } catch (_) {}
+           try { if (rightWin) rightWin.name = `${CS_PANE_SIDE_NAME_PREFIX}right`; } catch (_) {}
+           leftWin?.postMessage({ __csDemoPaneSide: 'left' }, 'https://snapshot.contentsquare.com');
+           rightWin?.postMessage({ __csDemoPaneSide: 'right' }, 'https://snapshot.contentsquare.com');
         }
 
       } else if (visibleTriggers.length === 1) {
@@ -3232,6 +3307,17 @@
   }
 
   function getColorLimitsForElement(el) {
+    // Highest priority: if this zone has one of our own generated overrides,
+    // use the exact min/max that was actually used to generate its value —
+    // not the registry's static default, which can differ from a custom
+    // range typed into Bulk Fill / 360 Data for this specific run (and not
+    // a stale native color-limits attribute, which no longer applies once
+    // we've replaced the zone's metric/value).
+    const ownOverride = getOverrideForElement(el)?.override;
+    if (ownOverride && Number.isFinite(ownOverride.limitMin) && Number.isFinite(ownOverride.limitMax)) {
+      return { limitMin: ownOverride.limitMin, limitMax: ownOverride.limitMax };
+    }
+
     const rawCandidates = [
       el.getAttribute('color-limits'),
       el.getAttribute('colorlimits'),
@@ -4519,8 +4605,8 @@
 
     if (applied > 0) {
       // PRO FIX: Multi-signal detection for the Right Pane
-      const isRightSide = 
-        (typeof window.__csDemoPaneSide === 'string' && window.__csDemoPaneSide.includes('right')) || 
+      const isRightSide =
+        getWhisperedPaneSide() === 'right' ||
         Array.from(paneRows.keys()).some(k => k.includes('right')) ||
         (window.frameElement && window.frameElement.id.includes('right'));
 
@@ -5211,12 +5297,7 @@
     refreshMetricTypeName();
     const currentMetricName = String(csMetricTypeName || '').trim();
 
-    let zoneElements = getCandidateZoneElements();
-    if (zoneElements.length === 0) {
-      syncZoneWatchers();
-      await new Promise(resolve => setTimeout(resolve, 50));
-      zoneElements = getCandidateZoneElements();
-    }
+    let zoneElements = await waitForStableZoneCount();
 
     // ... (rest of your logic remains the same below) ...
     let hasPercent = false;
@@ -5289,11 +5370,13 @@
       const group = paneGroups[pKey].sort((a, b) => (Number.isFinite(a.y) ? a.y : 0) - (Number.isFinite(b.y) ? b.y : 0));
       const totalEligible = group.length;
 
-      // Pane-Aware Variance: Identify right pane by key
-      const isRightPane = pKey.includes('right');
-      const variance = isRightPane ? 0.88 : 1; // 12% drop for the right side
-      const pMax = maxVal * variance;
-      const pMin = minVal * variance;
+      // Bulk Fill is a single-metric quick-fill tool, not intended for
+      // deliberate left/right pane differentiation (that's 360° Data's
+      // job) — always use the full user-specified range regardless of
+      // pane. isRightPane is kept only for the zone-name label below.
+      const isRightPane = pKey.includes('right') || getWhisperedPaneSide() === 'right';
+      const pMax = maxVal;
+      const pMin = minVal;
 
       // EXPLICIT LABELING: Define the exact suffix based on the mode
       let modeSuffix = ' - Non Compare';
@@ -5330,12 +5413,14 @@
         const displayMetric = formatMetricValue(numericValue, targetMetricName, row.el.getAttribute('metric'));
         const metricKey = `${row.zoneKey}@${targetMetricName}`;
         
-        overrides[metricKey] = { 
-            metric: displayMetric, 
-            value: numericValue, 
-            origMetric: '—', 
-            zoneName: `${targetMetricName} Bulk${modeSuffix}`, 
-            csMetricTypeName: targetMetricName 
+        overrides[metricKey] = {
+            metric: displayMetric,
+            value: numericValue,
+            origMetric: '—',
+            zoneName: `${targetMetricName} Bulk${modeSuffix}`,
+            csMetricTypeName: targetMetricName,
+            limitMin: pMin,
+            limitMax: pMax
         };
 
         applyOverride(row.el, overrides[metricKey]);
@@ -5358,9 +5443,9 @@
     return { applied, totalZones: zoneElements.length };
   }
 
-  async function generateAllClientMetrics(updatedRegistry, jitter = 0.16, trueRandom = false, overwriteAll = false) {  
+  async function generateAllClientMetrics(updatedRegistry, jitter = 0.16, trueRandom = false, overwriteAll = false, paneVariancePercent = 12) {
     isBulkGenerating = true;
-    
+
     if (updatedRegistry) {
       metricRegistry = updatedRegistry;
     }
@@ -5376,7 +5461,13 @@
       name, ...config
     }));
 
-    let zones = getCandidateZoneElements();
+    // User-configurable right-pane variance (default 12%, matching the old
+    // hardcoded behavior). Clamped to +/-100 so an extreme input can't flip
+    // the range's sign. Positive = right pane runs lower; negative = higher.
+    const clampedVariancePercent = Math.max(-100, Math.min(100, Number.isFinite(paneVariancePercent) ? paneVariancePercent : 12));
+    const varianceMultiplier = 1 - (clampedVariancePercent / 100);
+
+    let zones = await waitForStableZoneCount();
     if (zones.length === 0) {
       isBulkGenerating = false;
       return { ok: true, metricsCount: metricsLibrary.length, zonesCount: 0 };
@@ -5409,9 +5500,12 @@
       Object.keys(panes).forEach((pKey) => {
         const paneZones = panes[pKey].sort((a, b) => a.y - b.y);
 
-        // Pane-Aware Variance: Identify right pane by key
-        const isRightPane = pKey.includes('right');
-        const variance = isRightPane ? 0.88 : 1; // 12% drop for the right side
+        // Pane-Aware Variance: Identify right pane by key, but never for
+        // depth-only metrics (Exposure Rate/Time) — everyone sees the top of
+        // the page regardless of which variant they're on, so there's no
+        // realistic "right pane underperforms" story for these.
+        const isRightPane = (pKey.includes('right') || getWhisperedPaneSide() === 'right') && !isDepthOnly;
+        const variance = isRightPane ? varianceMultiplier : 1;
         const pMax = m.max * variance;
         const pMin = m.min * variance;
 
@@ -5457,20 +5551,22 @@
 
           const overrideKey = `${row.key}@${m.name}`;
           
-          overrides[overrideKey] = { 
-              metric: display, 
-              value: val, 
-              origMetric: '—', 
-              zoneName: `${m.name} Data${modeSuffix}`, 
-              csMetricTypeName: m.name 
+          overrides[overrideKey] = {
+              metric: display,
+              value: val,
+              origMetric: '—',
+              zoneName: `${m.name} Data${modeSuffix}`,
+              csMetricTypeName: m.name,
+              limitMin: pMin,
+              limitMax: pMax
           };
         });
       });
     });
 
     // PRO FIX: Stagger all panes to survive SPA ghost-zone collisions
-    const hasRightPane = Object.keys(panes).some(k => k.includes('right')) || window.__csDemoPaneSide === 'right';
-    const hasLeftPane = Object.keys(panes).some(k => k.includes('left')) || window.__csDemoPaneSide === 'left';
+    const hasRightPane = Object.keys(panes).some(k => k.includes('right')) || getWhisperedPaneSide() === 'right';
+    const hasLeftPane = Object.keys(panes).some(k => k.includes('left')) || getWhisperedPaneSide() === 'left';
     
     if (!isTopFrame) {
       if (hasRightPane) {
@@ -5603,7 +5699,7 @@
           
           <div class="section-label" style="color: #4a4a64; display: flex; align-items: center;">
             Data Realism (Jitter)
-            <span class="help-icon" title="Jitter adds human-like variance to the data. 0% creates a mathematically perfect, straight-line drop-off. 15-20% adds organic 'bumps' along the curve. 100% makes the data highly erratic while still generally trending downward.">[?]</span>
+            <span class="help-icon" title="Jitter adds human-like variance to each zone's value as you go down the page (top-to-bottom), within a single pane. 0% creates a mathematically perfect, straight-line drop-off. 15-20% adds organic 'bumps' along the curve. 100% makes the data highly erratic while still generally trending downward. This is separate from Right Pane Variance below, which controls the difference between the left and right panes, not top-to-bottom.">[?]</span>
           </div>
           <div style="display:flex; align-items:center; gap:10px; margin-bottom: 6px;">
             <input type="range" id="inp-jitter" min="0" max="100" step="1" value="16" style="flex:1;" ${isEditing ? '' : 'disabled'}>
@@ -5647,7 +5743,15 @@
                 </div>
               `).join('')}
             </div>
-            <div class="chk-row" style="margin-bottom: 12px; margin-top: 8px;">
+            <div class="section-label" style="color: #4a4a64; display:flex; align-items:center; margin-top: 8px;">
+              Right Pane Variance
+              <span class="help-icon" title="How much the right pane's generated range differs from the left, in a compare view. Positive values make the right pane run lower; negative values make the right pane run higher than the left. 0 = no deliberate difference — each pane still varies independently. Never applied to Exposure Rate/Time, since everyone sees the top of the page the same way regardless of pane.">[?]</span>
+            </div>
+            <div class="row" style="margin-bottom: 12px;">
+              <input id="inp-pane-variance" class="inp" type="number" step="1" value="12" placeholder="e.g. 12" ${isEditing ? '' : 'disabled'}>
+              <span class="hint" style="align-self:center;">% diff on right pane</span>
+            </div>
+            <div class="chk-row" style="margin-bottom: 12px;">
               <label style="display:flex;align-items:center;cursor:pointer;">
                 <input type="checkbox" id="chk-nuclear-overwrite" ${isEditing ? '' : 'disabled'}> Overwrite existing native data (>0)
               </label>
@@ -6015,15 +6119,17 @@
       const jitter = parseFloat(shadow.getElementById('inp-jitter')?.value || '16') / 100;
       const trueRandom = shadow.getElementById('chk-true-random')?.checked || false;
       const overwriteAll = shadow.getElementById('chk-nuclear-overwrite')?.checked || false;
+      const paneVarianceParsed = parseFloat(shadow.getElementById('inp-pane-variance')?.value);
+      const paneVariancePercent = Number.isFinite(paneVarianceParsed) ? paneVarianceParsed : 12;
 
       if (isTopFrame) {
         chrome.runtime.sendMessage({
           type: 'broadcastToTab',
-          payload: { type: 'generateAllInFrame', updatedRegistry, jitter, trueRandom, overwriteAll }
+          payload: { type: 'generateAllInFrame', updatedRegistry, jitter, trueRandom, overwriteAll, paneVariancePercent }
         });
-        generateAllClientMetrics(updatedRegistry, jitter, trueRandom, overwriteAll);
+        generateAllClientMetrics(updatedRegistry, jitter, trueRandom, overwriteAll, paneVariancePercent);
       } else {
-        generateAllClientMetrics(updatedRegistry, jitter, trueRandom, overwriteAll);
+        generateAllClientMetrics(updatedRegistry, jitter, trueRandom, overwriteAll, paneVariancePercent);
       }
     });
 
@@ -6909,6 +7015,17 @@
       return true;
     }
 
+    if (msg.type === 'assignPaneSide') {
+      // Delivered via chrome.tabs.sendMessage targeted at this exact
+      // frameId — reliable regardless of page-level cross-origin
+      // restrictions that block window.name/postMessage in some
+      // environments. See getWhisperedPaneSide().
+      csAssignedPaneSide = (msg.side === 'right' || msg.side === 'left') ? msg.side : null;
+      applyAllOverrides();
+      sendResponse({ ok: true });
+      return true;
+    }
+
     if (msg.type === 'refresh_from_storage') {
       if (msg.metrics) {
          csActiveMetrics = msg.metrics;
@@ -7059,10 +7176,10 @@
 
     if (msg.type === 'generateAllInFrame') {
       // Everyone runs it simultaneously! Stagger is handled natively inside.
-      generateAllClientMetrics(msg.updatedRegistry, msg.jitter, msg.trueRandom, msg.overwriteAll).then(result => {
+      generateAllClientMetrics(msg.updatedRegistry, msg.jitter, msg.trueRandom, msg.overwriteAll, msg.paneVariancePercent).then(result => {
         sendResponse({ ok: true, frame: frameContextKey, ...result });
       });
-      return true; 
+      return true;
     }
 
     if (msg.type === 'applyExposureGradientInFrame') {

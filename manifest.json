@@ -6,7 +6,8 @@
   "permissions": [
     "storage",
     "scripting",
-    "activeTab"
+    "activeTab",
+    "webNavigation"
   ],
   "host_permissions": [
     "https://app.contentsquare.com/*",
