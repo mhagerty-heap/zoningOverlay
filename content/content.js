@@ -8,28 +8,28 @@
   'use strict';
 
   let metricRegistry = {
-    "blank rate": { min: 2, max: 25, type: "percent" },
-    "drop rate": { min: 5, max: 45, type: "percent" },
-    "refill rate": { min: 3, max: 30, type: "percent" },
     "attractiveness rate": { min: 5, max: 65, type: "percent" },
+    "blank rate": { min: 2, max: 25, type: "percent" },
+    "click distribution": { min: 1, max: 25, type: "percent" },
     "click rate (pageview level)": { min: 0.5, max: 12, type: "percent" },
     "click rate (session level)": { min: 0.8, max: 15, type: "percent" },
-    "click distribution": { min: 1, max: 25, type: "percent" },
-    "exposure rate": { min: 20, max: 100, type: "percent" },
-    "engagement rate": { min: 5, max: 45, type: "percent" },
-    "hover rate": { min: 10, max: 55, type: "percent" },
+    "click recurrence": { min: 1.0, max: 2.5, type: "decimal" },
     "conversion rate per click": { min: 0.2, max: 6.5, type: "percent" },
     "conversion rate per hover": { min: 0.1, max: 4.5, type: "percent" },
-    "purchase - cr per click": { min: 0.3, max: 5.5, type: "percent" },
-    "purchase - cr per hover": { min: 0.1, max: 3.5, type: "percent" },
-    "time before first click": { min: 3, max: 20, type: "time" },
+    "drop rate": { min: 5, max: 45, type: "percent" },
+    "engagement rate": { min: 5, max: 45, type: "percent" },
+    "exposure rate": { min: 20, max: 100, type: "percent" },
     "exposure time": { min: 2, max: 35, type: "time" },
     "float time": { min: 1, max: 15, type: "time" },
     "hesitation time": { min: 1.5, max: 12, type: "time" },
+    "hover rate": { min: 10, max: 55, type: "percent" },
+    "number of clicks": { min: 50, max: 4500, type: "count" },
+    "purchase - cr per click": { min: 0.3, max: 5.5, type: "percent" },
+    "purchase - cr per hover": { min: 0.1, max: 3.5, type: "percent" },
+    "refill rate": { min: 3, max: 30, type: "percent" },
     "revenue": { min: 250, max: 5000, type: "currency" },
     "revenue per click": { min: 5, max: 150, type: "currency" },
-    "number of clicks": { min: 50, max: 4500, type: "count" },
-    "click recurrence": { min: 1.0, max: 2.5, type: "decimal" }
+    "time before first click": { min: 3, max: 20, type: "time" }
   };
 
   window.__CS_DEBUG__ = {
@@ -3109,10 +3109,6 @@
     return raw;
   }
 
-  function isExposureRateMetric(metricTypeName) {
-    return /(^|\s)exposure\s+rate(\s|$)/i.test(String(metricTypeName || '').trim());
-  }
-
   // Exposure Rate/Time are pure functions of scroll depth — no legitimate
   // per-element variance, unlike Blank Rate/Click Rate/etc.
   function isDepthOnlyMetric(metricTypeName) {
@@ -4464,14 +4460,15 @@
       refreshMetricTypeName();
     }
     const selectedMetricType = String(options.selectedMetricType || csMetricTypeName || '').trim();
-    if (!isExposureRateMetric(selectedMetricType)) {
+    if (!isDepthOnlyMetric(selectedMetricType)) {
       isBulkGenerating = false;
       return {
         ok: false,
-        reason: 'Exposure Rate is not the selected metric',
+        reason: 'Exposure Rate or Exposure Time is not the selected metric',
         selectedMetricType
       };
     }
+    const isTimeMetric = /time/i.test(selectedMetricType);
 
     const topBound = Number.isFinite(Number(options.topBound)) ? Number(options.topBound) : 100;
     const bottomBound = Number.isFinite(Number(options.bottomBound)) ? Number(options.bottomBound) : 20;
@@ -4574,7 +4571,9 @@
           numericValue = paneBottom + score * (paneTop - paneBottom);
         }
 
-        const displayMetric = formatPercent(numericValue, decimals);
+        const displayMetric = isTimeMetric
+          ? `${numericValue.toFixed(decimals)}s`
+          : formatPercent(numericValue, decimals);
 
         const wrote = upsertZoneOverride(
           row.el,
@@ -5760,9 +5759,10 @@
           </div>
 
           <div id="pane-exposure" class="inner-tab-pane">
+            <div class="hint" style="margin-bottom:6px;">Works with Exposure Rate or Exposure Time selected as the current metric. Units match whichever one is selected — % for Rate, seconds for Time.</div>
             <div class="row">
-              <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top %" ${isEditing ? '' : 'disabled'}>
-              <input id="inp-exp-bottom" class="inp" type="number" step="0.1" value="20" placeholder="Bottom %" ${isEditing ? '' : 'disabled'}>
+              <input id="inp-exp-top" class="inp" type="number" step="0.1" value="100" placeholder="Top Value" ${isEditing ? '' : 'disabled'}>
+              <input id="inp-exp-bottom" class="inp" type="number" step="0.1" value="20" placeholder="Bottom Value" ${isEditing ? '' : 'disabled'}>
             </div>
             <div class="chk-row"><label style="display:flex;cursor:pointer;"><input type="checkbox" id="chk-exp-fixed-fold" ${isEditing ? '' : 'disabled'}> Use fixed fold position</label></div>
             <div class="fold-row">
