@@ -290,14 +290,31 @@
          activePageKey = normalizeCsUrlKey(window.location.href);
          resolve();
       } else {
-         // Subframes must ask the Top Frame for the true URL
-         chrome.runtime.sendMessage({
-           type: 'broadcastToTab',
-           payload: { type: 'requestActivePageKey' }
-         }, () => {
-           void chrome.runtime.lastError;
-           resolve();
-         });
+         // Subframes ask the background script directly for the key,
+         // computed from chrome.tabs' record of the top frame's URL. This
+         // doesn't depend on the top frame's content script having started
+         // yet (unlike the old requestActivePageKey/syncActivePageKey
+         // broadcast, which was relayed through a frame registry that could
+         // be stale while CSQ's own app-zonings component was still
+         // destroying and rebuilding pane iframes during bootstrap). Retry a
+         // few times since sender.tab briefly isn't available immediately
+         // after a frame is created.
+         let attempt = 0;
+         const tryFetch = () => {
+           attempt += 1;
+           chrome.runtime.sendMessage({ type: 'getActivePageKey' }, response => {
+             void chrome.runtime.lastError;
+             if (response && response.ok && response.key) {
+               activePageKey = response.key;
+               resolve();
+             } else if (attempt < 5) {
+               setTimeout(tryFetch, 150);
+             } else {
+               resolve();
+             }
+           });
+         };
+         tryFetch();
       }
     });
   }
@@ -336,7 +353,8 @@
     return new Promise(resolve => {
       chrome.storage.local.get('csZoningOverrides', result => {
         const all = result.csZoningOverrides || {};
-        overrides = all[getUrlKey()] || {};
+        const key = getUrlKey();
+        overrides = all[key] || {};
         resolve();
       });
     });
@@ -2501,12 +2519,60 @@
   // page architecture doesn't block them the way this one does.
   const CS_PANE_SIDE_NAME_PREFIX = 'csDemoPaneSide:';
   function getWhisperedPaneSide() {
-    if (csAssignedPaneSide) return csAssignedPaneSide;
+    // Prefer the postMessage/window.name whisper: both are set from the top
+    // frame's direct DOM iframe REFERENCES sorted by real geometry, so
+    // they're correct regardless of frameId creation order or whether CSQ
+    // happens to assign the two panes an identical src/JWT (confirmed to
+    // happen — chrome.webNavigation-based assignment below can't tell such
+    // panes apart at all, since it has no visibility into geometry, only
+    // frame identity). csAssignedPaneSide (background/webNavigation-derived)
+    // is the last-resort fallback for the brief window before the first
+    // whisper lands.
     const fromName = String(window.name || '');
     if (fromName.startsWith(CS_PANE_SIDE_NAME_PREFIX)) {
       return fromName.slice(CS_PANE_SIDE_NAME_PREFIX.length);
     }
-    return window.__csDemoPaneSide || null;
+    if (window.__csDemoPaneSide) return window.__csDemoPaneSide;
+    return csAssignedPaneSide || null;
+  }
+
+  // Geometry-sorted big iframes (the two compare panes), left-to-right by
+  // bounding rect. This is the reliable signal for which pane is visually
+  // left/right — unlike chrome.webNavigation frameId order, which reflects
+  // creation order, not screen position, and can disagree with it after
+  // CSQ's own app-zonings component destroys and recreates pane iframes.
+  function getSortedComparePaneIframes() {
+    const iframes = getAllElementsByTag('iframe').filter(f => {
+      try {
+        const r = f.getBoundingClientRect();
+        // Filter out tiny hidden tracking iframes. Compare iframes are massive.
+        return r.width > window.innerWidth * 0.25;
+      } catch (e) { return false; }
+    });
+    iframes.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+    return iframes;
+  }
+
+  // Self-service pull for this pane's own side, with retry. Complements the
+  // top frame's one-shot requestPaneSideAssignment push (assignPaneSide
+  // handler below), which has no retry and can be lost for good if it fires
+  // while CSQ's own app-zonings component is still destroying/rebuilding
+  // pane iframes and fewer than 2 candidate frames exist yet.
+  function pullMyPaneSideWithRetry(attempt = 1) {
+    chrome.runtime.sendMessage({ type: 'getMyPaneSide' }, response => {
+      void chrome.runtime.lastError;
+      if (response && response.ok && response.side) {
+        if (csAssignedPaneSide !== response.side) {
+          csAssignedPaneSide = response.side;
+          applyAllOverrides();
+        }
+      } else if (attempt < 40) {
+        // 40 x 500ms = 20s, matching startAggressiveZonePolling's window
+        // for the same underlying wait (CSQ's app-zonings component
+        // settling after destroy/rebuild churn on a large scenario).
+        setTimeout(() => pullMyPaneSideWithRetry(attempt + 1), 500);
+      }
+    });
   }
 
   function getPaneKey(el) {
@@ -2531,9 +2597,17 @@
       } catch (_) { }
 
       try {
-        // CORE FIX: Removed win.location.search
-        const frameName = win.name ? `|name:${win.name}` : '';
-        return `sub:${win.location.origin}${win.location.pathname}${frameName}`;
+        // Deliberately NOT including win.name here (unlike an earlier
+        // version): win.name is what getWhisperedPaneSide()/getPaneKey's
+        // separate `|side:` suffix already encodes, and it's set
+        // asynchronously (whisper arrives some time after load) — folding
+        // it into the base frameScope made the override storage key itself
+        // unstable across reloads (present in the key once the whisper
+        // landed, absent before that), causing every override lookup to
+        // miss whenever a reload's timing differed from the save-time
+        // timing. frameScope must be a stable identifier on its own; side
+        // disambiguation happens exactly once, in getPaneKey.
+        return `sub:${win.location.origin}${win.location.pathname}`;
       } catch (_) {
         return frameScopeKey;
       }
@@ -2999,22 +3073,22 @@
 
         // FALLBACK WHISPER: legacy page-level channels, best-effort only,
         // for architectures where they aren't blocked.
-        const iframes = getAllElementsByTag('iframe').filter(f => {
-           try {
-             const r = f.getBoundingClientRect();
-             // Filter out tiny hidden tracking iframes. Compare iframes are massive.
-             return r.width > window.innerWidth * 0.25;
-           } catch(e) { return false; }
-        });
-
-        iframes.sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+        const iframes = getSortedComparePaneIframes();
         if (iframes.length >= 2) {
            const leftWin = iframes[0].contentWindow;
            const rightWin = iframes[iframes.length - 1].contentWindow;
            try { if (leftWin) leftWin.name = `${CS_PANE_SIDE_NAME_PREFIX}left`; } catch (_) {}
            try { if (rightWin) rightWin.name = `${CS_PANE_SIDE_NAME_PREFIX}right`; } catch (_) {}
-           leftWin?.postMessage({ __csDemoPaneSide: 'left' }, 'https://snapshot.contentsquare.com');
-           rightWin?.postMessage({ __csDemoPaneSide: 'right' }, 'https://snapshot.contentsquare.com');
+           // '*' rather than a hardcoded origin: this iframe can still be
+           // mid-navigation (its committed origin briefly matching the
+           // parent's, not snapshot.contentsquare.com yet) when this fires,
+           // which made postMessage silently no-op against a fixed target
+           // origin. The payload carries no sensitive data, so a wildcard
+           // origin is an acceptable trade — and this whisper is re-sent
+           // every ~1.2s via syncZoneWatchers's polling, self-healing once
+           // the frame settles.
+           leftWin?.postMessage({ __csDemoPaneSide: 'left' }, '*');
+           rightWin?.postMessage({ __csDemoPaneSide: 'right' }, '*');
         }
 
       } else if (visibleTriggers.length === 1) {
@@ -3549,7 +3623,7 @@
          removeOverrideVisually(el);
          return;
       }
-      
+
       const existing = getOverrideForElement(el);
       if (existing) applyOverride(el, existing.override);
       else removeOverrideVisually(el);
@@ -7011,6 +7085,28 @@
       return true;
     }
 
+    if (msg.type === 'queryPaneGeometry') {
+      // Only the top frame has DOM access to compare the two pane iframes'
+      // bounding rects. Answered live (no async wait) so background can use
+      // it to resolve a subframe's own side by matching its known URL
+      // against leftSrc/rightSrc — geometry-correct, unlike frameId order.
+      if (isTopFrame) {
+        const iframes = getSortedComparePaneIframes();
+        const leftSrc = iframes[0]?.src || null;
+        const rightSrc = iframes[iframes.length - 1]?.src || null;
+        // Only report ready when there are 2 distinct, non-empty src values.
+        // A transient state (e.g. only one pane widened to full size yet, or
+        // both mid-navigation still on the same placeholder URL) would
+        // otherwise report the SAME src for both slots, and two different
+        // callers could each spuriously match it and both get told 'left'.
+        const ready = iframes.length >= 2 && !!leftSrc && !!rightSrc && leftSrc !== rightSrc;
+        sendResponse({ ok: ready, leftSrc, rightSrc, count: iframes.length });
+      } else {
+        sendResponse({ ok: false, reason: 'not top frame' });
+      }
+      return true;
+    }
+
     if (msg.type === 'syncMetricName') {
       if (msg.metrics) {
          csActiveMetrics = msg.metrics;
@@ -8023,6 +8119,10 @@
       });
     } catch (_) {
       // Ignore registration failures; feature falls back to local frame behavior.
+    }
+
+    if (!isTopFrame && location.hostname === 'snapshot.contentsquare.com') {
+      pullMyPaneSideWithRetry();
     }
 
     // 2. Load all state from storage
