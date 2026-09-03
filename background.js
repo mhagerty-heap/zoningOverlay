@@ -31,6 +31,20 @@ function isEligibleUrl(url) {
   return isZoning || isJourney;
 }
 
+// Mirrors content.js's normalizeCsUrlKey for the top-level tab URL (never a
+// snapshot iframe URL, since chrome.tabs.get always reports the top frame's
+// address). Computing the key here — from the tab's real URL — sidesteps the
+// race where a subframe asks the top frame's content script for its key
+// before that script has finished initializing.
+function normalizeCsUrlKeyBg(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    return parsed.origin + parsed.pathname + parsed.hash.split('?')[0];
+  } catch (_) {
+    return '';
+  }
+}
+
 function getExtensionEnabled() {
   return new Promise(resolve => {
     chrome.storage.local.get(EXTENSION_ENABLED_KEY, result => {
@@ -187,6 +201,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'getActivePageKey') {
+    // Direct, synchronous-from-the-caller's-perspective answer computed from
+    // chrome.tabs' own record of the tab's URL — not dependent on the top
+    // frame's content script having run yet, and not routed through the
+    // frame registry (which can be stale/incomplete while CSQ's own
+    // app-zonings component is still destroying and rebuilding pane iframes
+    // during zoning-editor bootstrap).
+    chrome.tabs.get(sender.tab.id).then(tab => {
+      const key = normalizeCsUrlKeyBg(tab?.url || '');
+      sendResponse({ ok: !!key, key });
+    }).catch(error => {
+      sendResponse({ ok: false, error: error?.message || String(error) });
+    });
+    return true;
+  }
+
   if (msg.type === 'requestPaneSideAssignment') {
     // Tell each compare-pane iframe which side it's on via chrome.tabs.sendMessage
     // targeted at its exact frameId — an extension-privileged channel, unlike
@@ -214,6 +244,72 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       ]).then(() => {
         sendResponse({ ok: true, leftFrameId, rightFrameId, candidateCount: candidates.length });
       });
+    }).catch(error => {
+      sendResponse({ ok: false, error: error?.message || String(error) });
+    });
+    return true;
+  }
+
+  if (msg.type === 'getMyPaneSide') {
+    // Self-service pull, called directly by a pane iframe's own content
+    // script (with retries on its side) rather than waiting on the top
+    // frame to notice DOM changes and push a one-shot assignment. That push
+    // (requestPaneSideAssignment above) has no retry, so if it fires while
+    // CSQ's own app-zonings component is still destroying/rebuilding pane
+    // iframes and fewer than 2 candidates exist yet, the assignment is lost
+    // for good. This lets a frame that missed it ask again once topology
+    // has settled.
+    //
+    // Resolves the side by matching this frame's own URL against the top
+    // frame's live geometry (queryPaneGeometry), not by frameId order —
+    // frameId reflects creation order, not screen position, and the two
+    // can disagree after a destroy/rebuild cycle. Falls back to frameId
+    // order only if the geometry query is unavailable or neither URL
+    // matches (e.g. iframe src differs slightly from its committed URL).
+    const tabId = sender.tab.id;
+    const requestingFrameId = sender.frameId;
+    Promise.all([
+      chrome.webNavigation.getAllFrames({ tabId }),
+      chrome.tabs.sendMessage(tabId, { type: 'queryPaneGeometry' }, { frameId: 0 }).catch(error => ({ ok: false, error: error?.message || String(error) }))
+    ]).then(([frames, geometry]) => {
+      const candidates = (frames || [])
+        .filter(f => f.parentFrameId === 0 && f.frameId !== 0 && /snapshot\.contentsquare\.com/i.test(f.url || ''))
+        .sort((a, b) => a.frameId - b.frameId);
+
+      if (candidates.length < 2) {
+        sendResponse({ ok: false, reason: 'fewer than 2 candidate pane frames found', candidateCount: candidates.length });
+        return;
+      }
+
+      const idx = candidates.findIndex(f => f.frameId === requestingFrameId);
+      if (idx === -1) {
+        sendResponse({ ok: false, reason: 'requesting frame not among current candidates', candidateCount: candidates.length });
+        return;
+      }
+
+      const ownUrl = candidates[idx].url || '';
+      let side = null;
+      let method = null;
+      if (geometry && geometry.ok) {
+        if (geometry.leftSrc && ownUrl === geometry.leftSrc) { side = 'left'; method = 'geometry'; }
+        else if (geometry.rightSrc && ownUrl === geometry.rightSrc) { side = 'right'; method = 'geometry'; }
+      }
+      if (!side && geometry && geometry.error) {
+        // Geometry query itself is unavailable (e.g. top frame not
+        // responding at all) — fall back to frameId order rather than
+        // stalling forever. Best-effort only; may be wrong after churn.
+        side = idx === 0 ? 'left' : (idx === candidates.length - 1 ? 'right' : null);
+        method = 'frameOrderFallback';
+      }
+      if (!side) {
+        // Geometry answered but topology isn't settled yet (not ready, or
+        // this frame's URL didn't match either slot this instant) — say so
+        // without guessing, so the caller retries instead of locking in a
+        // wrong answer.
+        sendResponse({ ok: false, reason: 'geometry not ready or no match yet', geometryOk: !!(geometry && geometry.ok), candidateCount: candidates.length, ownUrl, leftSrc: geometry?.leftSrc, rightSrc: geometry?.rightSrc });
+        return;
+      }
+      sendResponse({ ok: true, side, method, candidateCount: candidates.length });
     }).catch(error => {
       sendResponse({ ok: false, error: error?.message || String(error) });
     });
