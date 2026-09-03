@@ -227,6 +227,11 @@
   let activePageKey = '';
   let csMetricTypeName = ''; // Current CS metric type label read from URL / DOM (e.g. "Click Rate")
   let overrides = {};           // { zoneId: { metric, value, origMetric, origValue } }
+  // Colors we've generated via getDerivedZoneColor/applyOverride. A zone element
+  // that inherits a color matching one of these (e.g. a carousel-slide clone
+  // copying an already-overridden slide's attributes) never legitimately had
+  // that color natively, so applyOverride must not "capture" it as original.
+  const csDemoAssignedColors = new Set();
   const zoneObservers = new Map(); // zoneKey -> { observer, element }
   let docObserver = null;
   let toolbarHost = null;
@@ -2480,8 +2485,13 @@
         el.setAttribute('data-cs-demo-orig-value', String(el.getAttribute('value') || ''));
       }
       
-      if (el.hasAttribute('color')) {
-        el.setAttribute('data-cs-demo-orig-color', String(el.getAttribute('color') || ''));
+      // A color left over from us (e.g. copied onto this element by CS's own
+      // carousel-slide cloning, or by a zone split/merge reusing another
+      // zone's attributes) was never native to this element — don't lock it
+      // in as the "original" to restore on reset.
+      const existingColor = el.getAttribute('color');
+      if (el.hasAttribute('color') && !csDemoAssignedColors.has(existingColor)) {
+        el.setAttribute('data-cs-demo-orig-color', String(existingColor || ''));
       }
     }
 
@@ -2490,11 +2500,14 @@
     const valueNum = typeof override === 'object' ? override.value : undefined;
 
     el.setAttribute('metric', metricDisplay);
-    
+
     if (valueNum !== undefined && !isNaN(Number(valueNum))) {
       el.setAttribute('value', String(valueNum));
       const derivedColor = getDerivedZoneColor(el, Number(valueNum));
-      if (derivedColor) el.setAttribute('color', derivedColor);
+      if (derivedColor) {
+        el.setAttribute('color', derivedColor);
+        csDemoAssignedColors.add(derivedColor);
+      }
     }
     
     el.style.outline = '2px dashed rgba(255, 210, 50, 0.9)';
@@ -3203,6 +3216,24 @@
     return remainingSpan > 0 ? Math.min(1, (distanceFromTop - CS_EXPOSURE_FLAT_TOP_PX) / remainingSpan) : 0;
   }
 
+  // Shared per-metric-type formatter, used by Bulk Fill/360° Data and by
+  // auto-filled split zones so generated values always render consistently.
+  function formatMetricValueByName(val, targetName, existingMetric) {
+    const name = String(targetName || '').toLowerCase();
+    const existing = String(existingMetric || '').trim();
+
+    const isCurrency = /[€$£¥]/.test(existing) || /(revenue|sales|order|transaction|aov|cart|price)/i.test(name);
+    const isPercentage = existing.includes('%') || /(rate|ratio|conversion|bounce|engagement|attractiveness|activity|exposure)/i.test(name) || name.includes('%');
+    const isTime = /\d\s*s\b/.test(existing) || existing.endsWith('s') || /(time|duration|seconds?)/i.test(name);
+    const isDecimal = (/[\.,]\d/.test(existing) && !isCurrency && !isPercentage && !isTime) || /(recurrence|average|per session|per user)/i.test(name);
+
+    if (isCurrency) return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    if (isPercentage) return `${val.toFixed(2)}%`;
+    if (isTime) return `${val.toFixed(2)}s`;
+    if (isDecimal) return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return Math.round(val).toLocaleString('en-US');
+  }
+
   function formatPercent(value, decimals = 1) {
     const n = Number(value);
     if (!Number.isFinite(n)) return '0.0%';
@@ -3511,6 +3542,90 @@
     persistOverrides();
   }
 
+  // Debounced persist for auto-filled split zones — a single CSQ zone
+  // redefinition can surface several new sibling zones in one DOM batch,
+  // so coalesce their writes into one storage save instead of one per zone.
+  let autoFillPersistTimer = null;
+  function scheduleAutoFillPersist() {
+    if (autoFillPersistTimer) return;
+    autoFillPersistTimer = setTimeout(() => {
+      autoFillPersistTimer = null;
+      persistOverridesMerged();
+      updateToolbar();
+    }, 400);
+  }
+
+  // When an SC redefines/splits a zone in Contentsquare's own UI, the new
+  // zone element gets a fresh CSQ-assigned id (see getZoneKey) and so has no
+  // override of its own yet. If sibling zones in the same pane already carry
+  // a generated value (Bulk Fill / 360° Data) for the metric currently on
+  // screen, interpolate this zone's value from its vertical position among
+  // them — same depth-based model those tools already use — instead of
+  // leaving it to show whatever CSQ natively rendered. Requires at least two
+  // valued siblings to interpolate between; otherwise this is a no-op and the
+  // zone just shows CSQ's native value, same as before.
+  function tryAutoFillSplitZone(el, zoneKey) {
+    const metricName = getActiveMetricForZone(zoneKey) || (csMetricTypeName || '').toLowerCase();
+    if (!metricName) return;
+
+    const paneKey = getPaneKey(el) || 'default';
+    const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    const y = rect && Number.isFinite(rect.top) && Number.isFinite(rect.height) ? (rect.top + rect.height / 2) : NaN;
+    if (!Number.isFinite(y)) return;
+
+    const siblings = [];
+    getAllZoneElements().forEach(sibEl => {
+      if (sibEl === el) return;
+      if ((getPaneKey(sibEl) || 'default') !== paneKey) return;
+      const sibKey = getZoneKey(sibEl);
+      if (!sibKey) return;
+      const ov = overrides[getMetricBasedKey(sibKey, metricName)];
+      if (!ov || !Number.isFinite(ov.value)) return;
+      const sRect = sibEl.getBoundingClientRect ? sibEl.getBoundingClientRect() : null;
+      const sy = sRect && Number.isFinite(sRect.top) && Number.isFinite(sRect.height) ? (sRect.top + sRect.height / 2) : NaN;
+      if (!Number.isFinite(sy)) return;
+      siblings.push({ y: sy, value: ov.value, limitMin: ov.limitMin, limitMax: ov.limitMax });
+    });
+
+    if (siblings.length < 2) return;
+
+    siblings.sort((a, b) => a.y - b.y);
+
+    let numericValue;
+    if (y <= siblings[0].y) {
+      numericValue = siblings[0].value;
+    } else if (y >= siblings[siblings.length - 1].y) {
+      numericValue = siblings[siblings.length - 1].value;
+    } else {
+      let lo = siblings[0], hi = siblings[siblings.length - 1];
+      for (let i = 0; i < siblings.length - 1; i++) {
+        if (y >= siblings[i].y && y <= siblings[i + 1].y) {
+          lo = siblings[i]; hi = siblings[i + 1];
+          break;
+        }
+      }
+      const span = hi.y - lo.y;
+      const ratio = span > 0 ? (y - lo.y) / span : 0;
+      numericValue = lo.value + ratio * (hi.value - lo.value);
+    }
+
+    const displayMetric = formatMetricValueByName(numericValue, metricName, el.getAttribute('metric'));
+    const overrideKey = getMetricBasedKey(zoneKey, metricName);
+
+    overrides[overrideKey] = {
+      metric: displayMetric,
+      value: numericValue,
+      origMetric: '—',
+      zoneName: `${metricName} Auto-Split`,
+      csMetricTypeName: metricName,
+      limitMin: siblings[0].limitMin,
+      limitMax: siblings[0].limitMax
+    };
+
+    applyOverride(el, overrides[overrideKey]);
+    scheduleAutoFillPersist();
+  }
+
   function watchZone(el) {
     const zoneKey = getZoneKey(el);
     if (!zoneKey) return;
@@ -3528,6 +3643,7 @@
 
     const match = getOverrideForElement(el);
     if (match) applyOverride(el, match.override);
+    else tryAutoFillSplitZone(el, zoneKey);
 
     const mo = new MutationObserver((mutations) => {
       const match = getOverrideForElement(el);
@@ -5303,6 +5419,7 @@
     // 3. INTERNAL CLEANUP
     overrides = {};
     heatmapPointOverrides = {};
+    csDemoAssignedColors.clear();
     journeyRules = [];
     persistJourneyRules();
     syncJourneyRulesToPageWorld();
@@ -5414,21 +5531,7 @@
     }
 
     // DYNAMIC FORMATTER: Evaluates the correct format per-zone!
-    const formatMetricValue = (val, targetName, existingMetric) => {
-      const name = String(targetName || '').toLowerCase();
-      const existing = String(existingMetric || '').trim();
-
-      const isCurrency = /[€$£¥]/.test(existing) || /(revenue|sales|order|transaction|aov|cart|price)/i.test(name);
-      const isPercentage = existing.includes('%') || /(rate|ratio|conversion|bounce|engagement|attractiveness|activity|exposure)/i.test(name) || name.includes('%');
-      const isTime = /\d\s*s\b/.test(existing) || existing.endsWith('s') || /(time|duration|seconds?)/i.test(name);
-      const isDecimal = (/[\.,]\d/.test(existing) && !isCurrency && !isPercentage && !isTime) || /(recurrence|average|per session|per user)/i.test(name);
-
-      if (isCurrency) return `$${val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-      if (isPercentage) return `${val.toFixed(2)}%`;
-      if (isTime) return `${val.toFixed(2)}s`;
-      if (isDecimal) return val.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-      return Math.round(val).toLocaleString('en-US');
-    };
+    const formatMetricValue = formatMetricValueByName;
 
     // Group eligible zones by pane so Left and Right don't mix their distributions
     const paneGroups = {};
