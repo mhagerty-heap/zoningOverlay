@@ -38,7 +38,16 @@
     // This will now report the result of our "Double-Drill"
     readMetric: () => (typeof readCsMetricTypeName !== 'undefined' ? readCsMetricTypeName() : 'not_loaded'),
     applyNow: () => (typeof applyAllOverrides !== 'undefined' ? applyAllOverrides() : null),
-    syncNow: () => (typeof syncZoneWatchers !== 'undefined' ? syncZoneWatchers() : null)
+    syncNow: () => (typeof syncZoneWatchers !== 'undefined' ? syncZoneWatchers() : null),
+    toolbarVisibility: () => ({
+      analysisMode: typeof getActiveAnalysisMode !== 'undefined' ? getActiveAnalysisMode() : 'not_loaded',
+      isLikelyZoningRoute: typeof isLikelyZoningRoute !== 'undefined' ? isLikelyZoningRoute() : 'not_loaded',
+      isLikelyJourneyRoute: typeof isLikelyJourneyRoute !== 'undefined' ? isLikelyJourneyRoute() : 'not_loaded',
+      zoneElementCount: typeof getAllZoneElements !== 'undefined' ? getAllZoneElements().length : 'not_loaded',
+      modeCandidates: typeof getAnalysisModeCandidates !== 'undefined'
+        ? getAnalysisModeCandidates().map(el => ({ text: (el.textContent || '').trim(), active: isModeElementActive(el), tag: el.tagName, className: el.className }))
+        : 'not_loaded'
+    })
   };
 
   const existingInstance = document.documentElement?.getAttribute('data-cs-demo-instance');
@@ -784,9 +793,30 @@
     if (!el) return false;
     const ariaPressed = (el.getAttribute('aria-pressed') || '').toLowerCase();
     const ariaSelected = (el.getAttribute('aria-selected') || '').toLowerCase();
-    const className = String(el.className || '').toLowerCase();
     if (ariaPressed === 'true' || ariaSelected === 'true') return true;
-    if (/(active|selected|current|checked)/.test(className)) return true;
+
+    // Modern data-attribute-driven state (Radix/shadcn-style components,
+    // used by the newer "XP" UI's menus) — the element's actual live state.
+    const dataState = (el.getAttribute('data-state') || '').toLowerCase();
+    const dataSelected = (el.getAttribute('data-selected') || '').toLowerCase();
+    if (dataState === 'active' || dataState === 'selected' || dataSelected === 'true') return true;
+
+    // Legacy string-based class conventions (e.g. "is-active", "tab--selected").
+    // Scan individual class tokens rather than the whole className string —
+    // Tailwind's arbitrary-variant tokens (e.g.
+    // "data-[selected=true]:bg-surface-interactive-neutral-medium-active-bg")
+    // always contain ":" and "[" and literally spell out words like
+    // "selected"/"active" as part of a CSS *selector*, unrelated to whether
+    // this element is actually selected right now — a whole-string substring
+    // search false-positives on every menu item styled that way, which is
+    // exactly what made a "Zoning" module-switcher entry look "active" on
+    // every page, not just actual zoning reports.
+    const classTokens = String(el.className || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const hasLegacyActiveToken = classTokens.some(token => {
+      if (token.includes(':') || token.includes('[')) return false;
+      return /(active|selected|current|checked)/.test(token);
+    });
+    if (hasLegacyActiveToken) return true;
 
     try {
       const style = window.getComputedStyle(el);

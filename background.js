@@ -9,6 +9,68 @@ const EDIT_MODE_CSS = `
 
 const EXTENSION_ENABLED_KEY = 'csZoningExtensionEnabled';
 
+// ─── Update check ───
+// No Chrome Web Store listing, so there's no built-in update mechanism.
+// SCs install by cloning/downloading the repo, so "is there a newer version"
+// just means "does manifest.json on master have a higher version than mine".
+const UPDATE_CHECK_KEY = 'csZoningUpdateCheck';
+const UPDATE_CHECK_ALARM = 'csZoningUpdateCheckAlarm';
+const UPDATE_CHECK_INTERVAL_MINUTES = 720; // 12h
+const REPO_MANIFEST_URL = 'https://raw.githubusercontent.com/mhagerty-heap/zoningOverlay/master/manifest.json';
+const REPO_URL = 'https://github.com/mhagerty-heap/zoningOverlay';
+
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+async function checkForUpdate() {
+  const currentVersion = chrome.runtime.getManifest().version;
+  let result = {
+    checkedAt: Date.now(),
+    currentVersion,
+    latestVersion: null,
+    updateAvailable: false,
+    repoUrl: REPO_URL,
+    error: null
+  };
+
+  try {
+    const response = await fetch(REPO_MANIFEST_URL, { cache: 'no-store' });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const remoteManifest = await response.json();
+    const latestVersion = remoteManifest?.version;
+    if (latestVersion) {
+      result.latestVersion = latestVersion;
+      result.updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+    }
+  } catch (error) {
+    result.error = error?.message || String(error);
+    console.warn('[CS Demo Tool][bg] update check failed', result.error);
+  }
+
+  await chrome.storage.local.set({ [UPDATE_CHECK_KEY]: result });
+  return result;
+}
+
+async function getUpdateStatus() {
+  const stored = await chrome.storage.local.get(UPDATE_CHECK_KEY);
+  const cached = stored[UPDATE_CHECK_KEY];
+  const currentVersion = chrome.runtime.getManifest().version;
+
+  // Stale, missing, or from a previously-installed version: refresh now.
+  const isStale = !cached || cached.currentVersion !== currentVersion
+    || (Date.now() - (cached.checkedAt || 0)) > UPDATE_CHECK_INTERVAL_MINUTES * 60 * 1000;
+
+  if (isStale) return checkForUpdate();
+  return cached;
+}
+
 // Tracks known content-script frame ids per tab for true fan-out messaging.
 const tabFrameRegistry = new Map(); // tabId -> Set<frameId>
 
@@ -142,6 +204,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       sendResponse({ ok: true, enabled });
     });
+    return true;
+  }
+
+  if (msg.type === 'getUpdateStatus') {
+    getUpdateStatus().then(status => sendResponse({ ok: true, status }));
     return true;
   }
 
@@ -378,6 +445,9 @@ chrome.runtime.onInstalled.addListener(async () => {
       return ensureContentScriptInjected(tab.id, 'onInstalled bootstrap');
     }));
   }
+
+  checkForUpdate();
+  chrome.alarms.create(UPDATE_CHECK_ALARM, { periodInMinutes: UPDATE_CHECK_INTERVAL_MINUTES });
 });
 
 chrome.runtime.onStartup?.addListener(() => {
@@ -390,4 +460,11 @@ chrome.runtime.onStartup?.addListener(() => {
       return ensureContentScriptInjected(tab.id, 'onStartup bootstrap');
     }));
   });
+
+  checkForUpdate();
+  chrome.alarms.create(UPDATE_CHECK_ALARM, { periodInMinutes: UPDATE_CHECK_INTERVAL_MINUTES });
+});
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm.name === UPDATE_CHECK_ALARM) checkForUpdate();
 });

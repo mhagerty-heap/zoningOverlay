@@ -29,7 +29,27 @@ async function sendMessageWithInjection(message) {
   }
 }
 
+function renderVersionInfo() {
+  const version = chrome.runtime.getManifest().version;
+  const footer = document.getElementById('footer-version');
+  if (footer) footer.textContent = `CS Demo Tool v${version}`;
+
+  chrome.runtime.sendMessage({ type: 'getUpdateStatus' }).then(response => {
+    const status = response?.status;
+    if (!status?.updateAvailable) return;
+
+    const banner = document.getElementById('update-banner');
+    const text = document.getElementById('update-banner-text');
+    const link = document.getElementById('update-banner-link');
+    text.textContent = `Update available: v${status.latestVersion} (you have v${status.currentVersion})`;
+    link.href = status.repoUrl;
+    banner.style.display = 'flex';
+  }).catch(() => {});
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
+  renderVersionInfo();
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   currentTabId = tab?.id;
 
@@ -112,6 +132,15 @@ function updateUI(state) {
     editBtn.disabled = false; uiBtn.disabled = false; resetAllBtn.disabled = true;
     editHint.style.display = 'block';
     editHint.textContent = 'Heatmap editing is available. Turn editing on, then click the heatmap.';
+  } else {
+    // Page didn't match any known report type (e.g. still loading, or a
+    // layout the detection in content.js doesn't recognize yet) — without
+    // this, the status text is left stuck on the HTML's default "Checking
+    // page…" placeholder forever.
+    setStatus('not-on-cs', 'Unrecognized page type');
+    editBtn.disabled = true; uiBtn.disabled = true; resetAllBtn.disabled = true;
+    editHint.style.display = 'block';
+    editHint.textContent = 'Open a Zoning or Journey report to use this extension.';
   }
 
   if (controlsEnabled && state.editMode && state.isZoningPage) {

@@ -1,17 +1,19 @@
 {
   "manifest_version": 3,
   "name": "CS Zoning Demo Tool",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Edit ContentSquare zoning metric values for customized demos",
   "permissions": [
     "storage",
     "scripting",
     "activeTab",
-    "webNavigation"
+    "webNavigation",
+    "alarms"
   ],
   "host_permissions": [
     "https://app.contentsquare.com/*",
-    "https://snapshot.contentsquare.com/*"
+    "https://snapshot.contentsquare.com/*",
+    "https://raw.githubusercontent.com/*"
   ],
   "background": {
     "service_worker": "background.js"
