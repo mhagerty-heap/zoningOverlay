@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "exportedAt": "2026-09-25T17:28:11.698Z",
+  "exportedAt": "2026-09-25T17:51:20.987Z",
   "pageKey": "https://app.contentsquare.com/#/analyze/navigation-path",
   "scenarios": {
     "Mobile Drop-off Re-engagement Demo": {
@@ -20,6 +20,17 @@
           "parentPath": [
             0,
             0
+          ],
+          "path": [
+            0,
+            0,
+            1
+          ],
+          "replays": [
+            {
+              "label": "iOS replays (no transaction)",
+              "url": "https://app.contentsquare.com/#/session-replay?project=861472&hash=657944fb9a070b905b3735caad75fc8f&env=1720895189"
+            }
           ],
           "users": 90
         },
@@ -94,14 +105,24 @@
           "path": [
             1
           ],
-          "replays": null,
+          "replays": [
+            {
+              "label": "iOS replays (no transaction)",
+              "url": "https://app.contentsquare.com/#/session-replay?project=861472&hash=657944fb9a070b905b3735caad75fc8f&env=1720895189"
+            }
+          ],
           "skipRebalance": true,
           "users": 1000
         },
         {
           "avgPagesViewedPerSession": null,
           "avgSessionDurationMsec": null,
-          "breakdown": null,
+          "breakdown": {
+            "convertedNotReturnedPct": 6.4,
+            "convertedReturnedPct": 1.6,
+            "notConvertedNotReturnedPct": 60,
+            "notConvertedReturnedPct": 32
+          },
           "channels": null,
           "churnPct": 60,
           "conversionPct": 8,
@@ -115,7 +136,12 @@
             1,
             0
           ],
-          "replays": null,
+          "replays": [
+            {
+              "label": "iOS replays (no transaction)",
+              "url": "https://app.contentsquare.com/#/session-replay?project=861472&hash=657944fb9a070b905b3735caad75fc8f&env=1720895189"
+            }
+          ],
           "skipRebalance": true,
           "users": 170
         },
@@ -169,7 +195,12 @@
             1,
             0
           ],
-          "replays": null,
+          "replays": [
+            {
+              "label": "iOS replays (no transaction)",
+              "url": "https://app.contentsquare.com/#/session-replay?project=861472&hash=657944fb9a070b905b3735caad75fc8f&env=1720895189"
+            }
+          ],
           "skipRebalance": true,
           "users": 90
         },
@@ -243,7 +274,7 @@
         }
       ],
       "overrides": {},
-      "updatedAt": 1790357286455,
+      "updatedAt": 1790358676395,
       "url": "https://app.contentsquare.com/#/analyze/navigation-path"
     }
   }

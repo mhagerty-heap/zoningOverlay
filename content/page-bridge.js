@@ -834,13 +834,6 @@
     return changed;
   }
 
-  function pathsEqual(a, b) {
-    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
-  }
-
-  function findRuleForPath(path) {
-    return getRules().find(r => r.kind === 'override' && pathsEqual(r.path, path) && Array.isArray(r.replays) && r.replays.length);
-  }
 
   const isJourneyExplorerUrl = url => url.includes('/api/journey/v1/') && url.includes('navigation-tree');
 
@@ -952,16 +945,15 @@
     return out;
   }
 
-  let _lastClickedCardOrdinal = -1;
+  let _lastClickedCardEl = null;
   let _lastClickedAt = 0;
 
   // The session-card elements aren't the only role="group" nodes on this
   // page — the edge/arrow SVGs between cards are ALSO role="group" (visible
   // in the accessibility tree as "Edge from node-X to node-Y"), which threw
-  // off ordinal counting until this was caught live. Cards are reliably the
-  // only role="group" elements whose own text includes "Users".
+  // off an earlier ordinal-counting approach. Cards are reliably the only
+  // role="group" elements whose own text includes "Users".
   const isCardGroup = el => !!(el && el.getAttribute && el.getAttribute('role') === 'group' && /users/i.test(el.textContent || ''));
-  const queryAllCardGroups = () => queryAllDeep('[role="group"]').filter(isCardGroup);
 
   document.addEventListener('click', event => {
     const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
@@ -974,11 +966,33 @@
       }
     }
     if (!cardEl) return;
-    const ordinal = queryAllCardGroups().indexOf(cardEl);
-    if (ordinal === -1) return;
-    _lastClickedCardOrdinal = ordinal;
+    _lastClickedCardEl = cardEl;
     _lastClickedAt = Date.now();
   }, true);
+
+  // Matching the clicked card to a rule by ORDINAL POSITION in a flattened
+  // full-tree walk turned out to be fragile in practice: a single native lane
+  // that runs 10+ sessions deep (very plausible — this demo project's own web
+  // chain does) shifts every ordinal after it, so "the 10th harvested node"
+  // and "the 10th rendered card" silently stop being the same node. Instead,
+  // read the Users count + Conversion% directly off the clicked card's own
+  // text and match that pair against our rules' own `users`/`conversionPct` —
+  // both values are already right there on the card, and the pair is unique
+  // across this dataset's replay-enabled rules by construction.
+  function findRuleForClickedCard(cardEl) {
+    if (!cardEl) return null;
+    const text = (cardEl.textContent || '').replace(/\s+/g, ' ');
+    const usersMatch = text.match(/([\d,]+)\s*Users/i);
+    if (!usersMatch) return null;
+    const users = parseInt(usersMatch[1].replace(/,/g, ''), 10);
+    const pcts = Array.from(text.matchAll(/(\d+(?:\.\d+)?)%/g)).map(m => parseFloat(m[1]));
+    return getRules().find(r => {
+      if (!Array.isArray(r.replays) || !r.replays.length) return false;
+      if (typeof r.users !== 'number' || Math.round(r.users) !== users) return false;
+      if (typeof r.conversionPct === 'number') return pcts.some(p => Math.abs(p - r.conversionPct) < 0.5);
+      return true;
+    });
+  }
 
   function injectReplayLinks(dialogEl, rule) {
     if (queryAllDeep('[data-cs-demo-replay-injected]', dialogEl).length) return;
@@ -1004,14 +1018,12 @@
 
   function pollForBreakdownDialog() {
     try {
-      if (Date.now() - _lastClickedAt > 4000 || _lastClickedCardOrdinal < 0) return;
+      if (Date.now() - _lastClickedAt > 4000 || !_lastClickedCardEl) return;
       const dialogs = queryAllDeep('[role="dialog"]');
       dialogs.forEach(dialogEl => {
         const heading = queryAllDeep('h1, h2, h3, [role="heading"]', dialogEl)[0];
         if (!heading || !/breakdown/i.test(heading.textContent || '')) return;
-        const node = _lastHarvestedFlatNodes[_lastClickedCardOrdinal];
-        if (!node) return;
-        const rule = findRuleForPath(node.path);
+        const rule = findRuleForClickedCard(_lastClickedCardEl);
         if (!rule) return;
         injectReplayLinks(dialogEl, rule);
       });
