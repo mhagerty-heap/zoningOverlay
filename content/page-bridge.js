@@ -994,26 +994,35 @@
     });
   }
 
-  function injectReplayLinks(dialogEl, rule) {
-    if (queryAllDeep('[data-cs-demo-replay-injected]', dialogEl).length) return;
+  // Un-disables the NATIVE "See replays" button in place and points its click
+  // at the mocked replay URL — no extra button injected. The button isn't
+  // disabled via a real `disabled` attribute (confirmed live: `.disabled`
+  // reads false) — it's `aria-disabled="true"` plus a `cursor: not-allowed`
+  // style, with the framework's own click handler presumably still checking
+  // its own internal disabled state regardless of what we do to the DOM. So:
+  // strip the visual disabled cues AND add our own capture-phase click
+  // handler that stops the event before it can reach that internal handler,
+  // rather than trusting attribute removal alone to make it clickable.
+  function enableReplayButton(dialogEl, rule) {
     const seeReplaysBtn = queryAllDeep('button', dialogEl).find(b => /see replays/i.test(b.textContent || ''));
-    if (!seeReplaysBtn || !seeReplaysBtn.parentElement) return;
+    if (!seeReplaysBtn) return;
+    if (seeReplaysBtn.dataset.csDemoReplayEnabled) return;
+    seeReplaysBtn.dataset.csDemoReplayEnabled = '1';
 
-    const wrap = document.createElement('span');
-    wrap.setAttribute('data-cs-demo-replay-injected', '1');
-    wrap.style.cssText = 'display:inline-flex;gap:6px;margin-left:8px;';
-    rule.replays.slice(0, 3).forEach(replay => {
-      const link = document.createElement('button');
-      link.textContent = `▶ ${replay.label || 'View replay'}`;
-      link.style.cssText = 'background:#2c2c8c;color:#fff;border:none;border-radius:4px;font-size:11px;padding:4px 8px;cursor:pointer;';
-      link.addEventListener('click', evt => {
-        evt.preventDefault();
-        evt.stopPropagation();
-        window.open(replay.url, '_blank');
-      });
-      wrap.appendChild(link);
-    });
-    seeReplaysBtn.parentElement.insertBefore(wrap, seeReplaysBtn.nextSibling);
+    seeReplaysBtn.removeAttribute('aria-disabled');
+    seeReplaysBtn.disabled = false;
+    seeReplaysBtn.style.cursor = 'pointer';
+    seeReplaysBtn.style.opacity = '1';
+    seeReplaysBtn.style.pointerEvents = 'auto';
+
+    const url = rule.replays[0] && rule.replays[0].url;
+    if (!url) return;
+    seeReplaysBtn.addEventListener('click', evt => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      evt.stopImmediatePropagation();
+      window.open(url, '_blank');
+    }, true);
   }
 
   function pollForBreakdownDialog() {
@@ -1025,7 +1034,7 @@
         if (!heading || !/breakdown/i.test(heading.textContent || '')) return;
         const rule = findRuleForClickedCard(_lastClickedCardEl);
         if (!rule) return;
-        injectReplayLinks(dialogEl, rule);
+        enableReplayButton(dialogEl, rule);
       });
     } catch (e) { dbg('replay poll error', e); }
   }

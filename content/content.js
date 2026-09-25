@@ -6163,16 +6163,12 @@
               <div class="chk-row" style="margin-bottom: 6px;">
                 <label style="display:flex; cursor:pointer; font-size: 11px; color: #666; font-weight: 600; align-items: center;">
                   <input type="checkbox" id="chk-je-replays" ${isEditing ? '' : 'disabled'}>
-                  <span style="margin-left: 6px;">Mocked replay links (shown on this node's Breakdown panel)</span>
+                  <span style="margin-left: 6px;">Mocked replay link</span>
                 </label>
+                <span class="help-icon" title="Un-disables this node's native 'See replays' button (on its Breakdown panel) and points it at the URL below — no extra button added, just the real one working.">[?]</span>
               </div>
               <div id="je-replay-fields" style="display:none; padding: 8px; background:#fafafe; border-radius:6px; margin-bottom: 8px;">
-                ${[0, 1, 2].map(i => `
-                  <div class="row" style="margin-bottom: 4px;">
-                    <input type="text" class="inp je-replay-label" data-row="${i}" placeholder="Label, e.g. Cart abandon">
-                    <input type="text" class="inp je-replay-url" data-row="${i}" placeholder="Replay URL">
-                  </div>
-                `).join('')}
+                <input type="text" id="je-replay-url" class="inp je-replay-url" data-row="0" placeholder="Replay list URL, e.g. a Session Replay report link" style="width:100%;">
               </div>
 
               <button id="btn-je-add-override" class="btn btn-apply" style="width: 100%;" ${isEditing ? '' : 'disabled'}>Add / Update Rule</button>
@@ -6552,15 +6548,8 @@
       }
 
       if (shadow.getElementById('chk-je-replays')?.checked) {
-        const replays = [];
-        shadow.querySelectorAll('.je-replay-label').forEach(inp => {
-          const row = inp.dataset.row;
-          const label = inp.value.trim();
-          const urlInp = shadow.querySelector(`.je-replay-url[data-row="${row}"]`);
-          const url = urlInp ? urlInp.value.trim() : '';
-          if (label && url) replays.push({ label, url });
-        });
-        if (replays.length) rule.replays = replays;
+        const url = shadow.getElementById('je-replay-url')?.value.trim();
+        if (url) rule.replays = [{ label: 'See replays', url }];
       }
 
       journeyExplorerRules = journeyExplorerRules.filter(r => !(r.kind === 'override' && JSON.stringify(r.path) === JSON.stringify(path)));
