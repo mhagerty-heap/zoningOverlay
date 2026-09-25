@@ -546,9 +546,476 @@
                 Object.defineProperty(this, 'response', { configurable: true, get: () => JSON.stringify(data) });
              }
           }
-        } catch(e) { } 
+        } catch(e) { }
       }
     });
     return originalXhrSend.apply(this, arguments);
   };
+})();
+
+// --- JOURNEY EXPLORER INTERCEPTOR (new report, separate API shape from the Sunburst above) ---
+(function() {
+  if (window.__csDemoJourneyExplorerInstalled) return;
+  window.__csDemoJourneyExplorerInstalled = true;
+
+  const CS_BRIDGE_DEBUG = false;
+  const dbg = (...args) => { if (CS_BRIDGE_DEBUG) console.log('[CS JE]', ...args); };
+
+  function closestAcrossShadowJE(startEl, selector) {
+    let node = startEl;
+    while (node) {
+      if (node.nodeType === 1 && node.matches && node.matches(selector)) return node;
+      if (node.parentElement) { node = node.parentElement; continue; }
+      const root = node.getRootNode ? node.getRootNode() : null;
+      if (root && root.host) { node = root.host; continue; }
+      break;
+    }
+    return null;
+  }
+
+  // Rules are pushed from content.js via a CustomEvent whenever they change.
+  let _rulesCache = [];
+  window.addEventListener('cs-demo-journey-explorer-rules-updated', event => {
+    const rules = event && event.detail && Array.isArray(event.detail.rules) ? event.detail.rules : [];
+    _rulesCache = rules;
+  });
+  const getRules = () => _rulesCache;
+
+  // Best-effort dataSourceId -> display name cache, opportunistically filled from
+  // the project/data-source name lookup CSQ's own app already fires. Falls back
+  // to the raw numeric id if we haven't seen it yet.
+  const dataSourceNameCache = {};
+  const getDataSourceLabel = id => dataSourceNameCache[id] || `Source ${id}`;
+  function cacheDataSourceNames(json) {
+    try {
+      const list = Array.isArray(json) ? json : (Array.isArray(json?.items) ? json.items : null);
+      if (!list) return;
+      list.forEach(entry => {
+        if (entry && entry.id != null && entry.name) dataSourceNameCache[entry.id] = entry.name;
+      });
+    } catch (_) {}
+  }
+  const isDataSourceNameLookup = url => url.includes('/api/projects-composite/v1/projects?') && url.includes('fields=name');
+
+  // ---------------------------------------------------------
+  // Tree addressing: nodes are addressed by an array of child-array indices
+  // from payload.tree's root, since sibling nodes can share dataSourceId.
+  // ---------------------------------------------------------
+  function findNodeInTree(tree, path) {
+    let nodes = tree;
+    let node = null;
+    const chain = [];
+    for (let i = 0; i < path.length; i++) {
+      if (!Array.isArray(nodes) || !nodes[path[i]]) return null;
+      node = nodes[path[i]];
+      chain.push(node.dataSourceId);
+      nodes = node.children;
+    }
+    return { node, chain };
+  }
+
+  function getParentChildrenArray(tree, path) {
+    if (!Array.isArray(path) || path.length === 0) return null;
+    if (path.length === 1) return tree;
+    const found = findNodeInTree(tree, path.slice(0, -1));
+    return found && found.node ? (found.node.children || null) : null;
+  }
+
+  function chainsMatch(a, b) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+
+  // ---------------------------------------------------------
+  // Harvester: flatten the tree in the same order it's addressed, for the
+  // Advanced-panel node picker AND for click-correlation (see below).
+  // ---------------------------------------------------------
+  let _lastHarvestedFlatNodes = [];
+  function harvestJourneyExplorerNodes(tree) {
+    const flat = [];
+    const walk = (nodes, parentPath, parentChain) => {
+      if (!Array.isArray(nodes)) return;
+      nodes.forEach((node, idx) => {
+        const path = [...parentPath, idx];
+        const chain = [...parentChain, node.dataSourceId];
+        const label = chain.map((id, i) => `S${i + 1} ${getDataSourceLabel(id)}`).join(' → ');
+        flat.push({ path, dataSourceIdChain: chain, dataSourceId: node.dataSourceId, label });
+        if (Array.isArray(node.children)) walk(node.children, path, chain);
+      });
+    };
+    walk(tree, [], []);
+    return flat;
+  }
+
+  // ---------------------------------------------------------
+  // Rebalancer: adapts the old Sunburst's leftover-redistribution math
+  // (stealSiblingTraffic above) to this shape's `upsampledSize` field.
+  // Locks the changed sibling to the new value, subtracts the delta from
+  // the rest proportionally to their existing volume. Best-effort — if the
+  // other siblings have zero combined volume there's nothing to take the
+  // delta from, so it's left as-is (acceptable for a demo-data tool).
+  // ---------------------------------------------------------
+  function rebalanceUsersAfterChange(childrenArr, lockedIndex, newUsers) {
+    if (!Array.isArray(childrenArr) || lockedIndex < 0 || lockedIndex >= childrenArr.length) return;
+    const target = childrenArr[lockedIndex];
+    const oldUsers = Number(target.upsampledSize) || 0;
+    const nextUsers = Math.max(0, Math.round(newUsers));
+    target.upsampledSize = nextUsers;
+    const delta = nextUsers - oldUsers;
+    if (delta === 0) return;
+
+    const others = childrenArr.filter((_, i) => i !== lockedIndex);
+    const othersVolume = others.reduce((sum, c) => sum + (Number(c.upsampledSize) || 0), 0);
+    if (othersVolume <= 0) return;
+
+    others.forEach(c => {
+      const share = (Number(c.upsampledSize) || 0) / othersVolume;
+      c.upsampledSize = Math.max(0, Math.round((Number(c.upsampledSize) || 0) - delta * share));
+    });
+  }
+
+  const CONVERSION_BREAKDOWN_KEYS = ['convertedReturned', 'convertedNotReturned', 'notConvertedReturned', 'notConvertedNotReturned'];
+
+  // ---------------------------------------------------------
+  // Apply all rules to a freshly-fetched tree. Returns true if anything changed
+  // (so the caller knows whether to re-serialize the response).
+  // ---------------------------------------------------------
+  function applyJourneyExplorerRules(tree, rules) {
+    if (!Array.isArray(tree) || !rules || !rules.length) return false;
+    let changed = false;
+
+    // 'hide' rules are handled in a separate pass below, after override/branch
+    // rules — removing a node changes its siblings' array indices, which
+    // would corrupt any other rule's stored path if done mid-loop.
+    rules.forEach(rule => {
+      try {
+        if (rule.kind === 'hide') {
+          return;
+        }
+        if (rule.kind === 'override') {
+          const found = findNodeInTree(tree, rule.path);
+          if (!found || !found.node) return;
+          if (!chainsMatch(found.chain, rule.dataSourceIdChainAtCreate)) {
+            dbg('skipping override rule, path no longer matches (tree reordered)', rule);
+            return;
+          }
+          const node = found.node;
+
+          if (typeof rule.users === 'number') {
+            if (rule.skipRebalance) {
+              // Set this node's volume in isolation — no sibling rebalancing.
+              // Needed when siblings represent independently-sized outcome
+              // buckets of the same parent cohort (e.g. "returned on web" vs
+              // "returned on mobile"), rather than one sibling stealing
+              // volume from another's existing flow (which IS what the
+              // rebalance below is for).
+              node.upsampledSize = Math.max(0, Math.round(rule.users));
+              changed = true;
+            } else {
+              const parentChildren = getParentChildrenArray(tree, rule.path);
+              const idx = rule.path[rule.path.length - 1];
+              if (parentChildren) {
+                rebalanceUsersAfterChange(parentChildren, idx, rule.users);
+                changed = true;
+              }
+            }
+          }
+          // NOTE: this API's percentage fields are plain 0-100 numbers, NOT the
+          // 0-1 decimal fraction the old Sunburst shape used (verified live:
+          // a rule value of 77 rendered as "77% Conversion", not "0.77%").
+          if (typeof rule.conversionPct === 'number') { node.percentageUsersConverted = rule.conversionPct; changed = true; }
+          if (typeof rule.churnPct === 'number') { node.percentageUsersChurned = rule.churnPct; changed = true; }
+          if (rule.breakdown) {
+            node.conversionBreakdown = node.conversionBreakdown || {};
+            const totalForBreakdown = Number(node.upsampledSize) || 0;
+            CONVERSION_BREAKDOWN_KEYS.forEach(key => {
+              const pctField = key + 'Pct';
+              if (typeof rule.breakdown[pctField] === 'number') {
+                const pct = rule.breakdown[pctField];
+                node.conversionBreakdown[key] = node.conversionBreakdown[key] || {};
+                node.conversionBreakdown[key].percentage = pct;
+                node.conversionBreakdown[key].upsampledSize = Math.round((pct / 100) * totalForBreakdown);
+              }
+            });
+            changed = true;
+          }
+          if (Array.isArray(rule.channels) && rule.channels.length) {
+            const totalForChannels = Number(node.upsampledSize) || 0;
+            node.marketingChannels = rule.channels
+              .filter(c => c && c.name)
+              .map(c => {
+                const pct = Number(c.usersPercentage) || 0;
+                return { name: c.name, usersPercentage: pct, upsampledSize: Math.round((pct / 100) * totalForChannels) };
+              });
+            changed = true;
+          }
+          if (typeof rule.avgSessionDurationMsec === 'number') { node.avgSessionDurationMsec = rule.avgSessionDurationMsec; changed = true; }
+          if (typeof rule.avgPagesViewedPerSession === 'number') { node.avgPagesViewedPerSession = rule.avgPagesViewedPerSession; changed = true; }
+        } else if (rule.kind === 'branch') {
+          const found = findNodeInTree(tree, rule.parentPath);
+          if (!found || !found.node) return;
+          if (!chainsMatch(found.chain, rule.parentDataSourceIdChainAtCreate)) {
+            dbg('skipping branch rule, parent path no longer matches (tree reordered)', rule);
+            return;
+          }
+          const parent = found.node;
+          parent.children = Array.isArray(parent.children) ? parent.children : [];
+          // Breakdown/channels default to zeroed unless the rule provides them —
+          // without this, clicking into a fabricated node's Breakdown dialog
+          // would show 0% everywhere while the card shows real numbers.
+          const bd = rule.breakdown || {};
+          const branchTotalUsers = typeof rule.users === 'number' ? Math.max(0, Math.round(rule.users)) : 0;
+          const buildSplit = pct => {
+            const p = typeof pct === 'number' ? pct : 0;
+            return { percentage: p, upsampledSize: Math.round((p / 100) * branchTotalUsers) };
+          };
+          const newChild = {
+            dataSourceId: rule.newDataSourceId,
+            upsampledSize: 0,
+            percentageUsersConverted: typeof rule.conversionPct === 'number' ? rule.conversionPct : 0,
+            percentageUsersChurned: typeof rule.churnPct === 'number' ? rule.churnPct : 0,
+            percentageFromParent: 0,
+            conversionBreakdown: {
+              convertedReturned: buildSplit(bd.convertedReturnedPct),
+              convertedNotReturned: buildSplit(bd.convertedNotReturnedPct),
+              notConvertedReturned: buildSplit(bd.notConvertedReturnedPct),
+              notConvertedNotReturned: buildSplit(bd.notConvertedNotReturnedPct)
+            },
+            marketingChannels: Array.isArray(rule.channels)
+              ? rule.channels.filter(c => c && c.name).map(c => {
+                  const pct = Number(c.usersPercentage) || 0;
+                  return { name: c.name, usersPercentage: pct, upsampledSize: Math.round((pct / 100) * branchTotalUsers) };
+                })
+              : [],
+            avgSessionDurationMsec: typeof rule.avgSessionDurationMsec === 'number' ? rule.avgSessionDurationMsec : 0,
+            avgPagesViewedPerSession: typeof rule.avgPagesViewedPerSession === 'number' ? rule.avgPagesViewedPerSession : 0,
+            children: [],
+            __csDemoFabricated: true
+          };
+          parent.children.push(newChild);
+          rebalanceUsersAfterChange(parent.children, parent.children.length - 1, typeof rule.users === 'number' ? rule.users : 0);
+          changed = true;
+        }
+      } catch (e) { dbg('rule apply error', e, rule); }
+    });
+
+    // Apply 'hide' rules last, grouped by parent children-array, removing
+    // highest index first within each group — otherwise removing an earlier
+    // sibling would shift the stored index of a later one still queued for
+    // removal in the same array.
+    const hideGroups = new Map();
+    rules.forEach(rule => {
+      if (rule.kind !== 'hide' || !Array.isArray(rule.path) || !rule.path.length) return;
+      const key = JSON.stringify(rule.path.slice(0, -1));
+      if (!hideGroups.has(key)) hideGroups.set(key, []);
+      hideGroups.get(key).push(rule);
+    });
+    hideGroups.forEach(groupRules => {
+      groupRules
+        .slice()
+        .sort((a, b) => b.path[b.path.length - 1] - a.path[a.path.length - 1])
+        .forEach(rule => {
+          try {
+            const found = findNodeInTree(tree, rule.path);
+            if (!found || !found.node) return;
+            if (!chainsMatch(found.chain, rule.dataSourceIdChainAtCreate)) {
+              dbg('skipping hide rule, path no longer matches (tree reordered)', rule);
+              return;
+            }
+            const parentChildren = getParentChildrenArray(tree, rule.path);
+            const idx = rule.path[rule.path.length - 1];
+            if (parentChildren && idx >= 0 && idx < parentChildren.length) {
+              parentChildren.splice(idx, 1);
+              changed = true;
+            }
+          } catch (e) { dbg('hide rule apply error', e, rule); }
+        });
+    });
+
+    return changed;
+  }
+
+  function pathsEqual(a, b) {
+    return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((v, i) => v === b[i]);
+  }
+
+  function findRuleForPath(path) {
+    return getRules().find(r => r.kind === 'override' && pathsEqual(r.path, path) && Array.isArray(r.replays) && r.replays.length);
+  }
+
+  const isJourneyExplorerUrl = url => url.includes('/api/journey/v1/') && url.includes('navigation-tree');
+
+  function processResponseJson(url, data) {
+    let changed = false;
+    if (isDataSourceNameLookup(url)) {
+      cacheDataSourceNames(data);
+      return false;
+    }
+    if (!isJourneyExplorerUrl(url)) return false;
+    if (!data || !data.payload || !Array.isArray(data.payload.tree)) return false;
+
+    // Apply rules BEFORE harvesting, not after — otherwise a fabricated
+    // branch never appears in the node picker, since the harvest would only
+    // ever see the pre-mutation tree. Applying first means the picker (and
+    // its "parent node" dropdown for Add Branch) reflects fabricated nodes
+    // too, so a second branch can be chained onto a first one. Verified
+    // live: a branch-of-a-branch renders correctly in the real UI, so this
+    // was purely a picker limitation, not a data/rendering one.
+    if (applyJourneyExplorerRules(data.payload.tree, getRules())) changed = true;
+
+    _lastHarvestedFlatNodes = harvestJourneyExplorerNodes(data.payload.tree);
+    window.postMessage({
+      type: 'CS_JOURNEY_EXPLORER_NODES_SCRAPED',
+      nodes: _lastHarvestedFlatNodes,
+      dataSourceNames: { ...dataSourceNameCache }
+    }, location.origin || '*');
+
+    return changed;
+  }
+
+  // ---------------------------------------------------------
+  // FETCH INTERCEPTOR
+  // ---------------------------------------------------------
+  const originalFetchJE = window.fetch;
+  window.fetch = async function(...args) {
+    const url = typeof args[0] === 'string' ? args[0] : (args[0] instanceof Request ? args[0].url : (args[0] && args[0].url) || '');
+    const method = (args[1] && args[1].method) ? args[1].method.toUpperCase() : 'GET';
+    const response = await originalFetchJE.apply(this, args);
+
+    if (method === 'OPTIONS') return response;
+    if (!url || (!isJourneyExplorerUrl(url) && !isDataSourceNameLookup(url))) return response;
+
+    try {
+      const clone = response.clone();
+      const data = await clone.json();
+      if (processResponseJson(url, data)) {
+        dbg('applied rule(s) to Journey Explorer payload', url);
+        return new Response(JSON.stringify(data), { status: response.status, headers: response.headers });
+      }
+    } catch (e) { dbg('fetch intercept error', e); }
+    return response;
+  };
+
+  // ---------------------------------------------------------
+  // XHR INTERCEPTOR
+  // ---------------------------------------------------------
+  const originalXhrOpenJE = XMLHttpRequest.prototype.open;
+  const originalXhrSendJE = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this._csJeUrl = url;
+    this._csJeMethod = (method || '').toUpperCase();
+    return originalXhrOpenJE.apply(this, arguments);
+  };
+
+  XMLHttpRequest.prototype.send = function(body) {
+    if (this._csJeMethod === 'OPTIONS' || !this._csJeUrl || (!isJourneyExplorerUrl(this._csJeUrl) && !isDataSourceNameLookup(this._csJeUrl))) {
+      return originalXhrSendJE.apply(this, arguments);
+    }
+    this.addEventListener('readystatechange', function() {
+      if (this.readyState !== 4) return;
+      try {
+        const data = JSON.parse(this.responseText);
+        if (processResponseJson(this._csJeUrl, data)) {
+          dbg('applied rule(s) to Journey Explorer payload (XHR)', this._csJeUrl);
+          Object.defineProperty(this, 'responseText', { configurable: true, get: () => JSON.stringify(data) });
+          Object.defineProperty(this, 'response', { configurable: true, get: () => JSON.stringify(data) });
+        }
+      } catch (e) { dbg('xhr intercept error', e); }
+    });
+    return originalXhrSendJE.apply(this, arguments);
+  };
+
+  // ---------------------------------------------------------
+  // MOCKED REPLAY LINKS: inject a working link next to the native disabled
+  // "See replays" button on the Breakdown dialog. Correlates a card click to
+  // a tree path by matching its ordinal position among rendered cards
+  // against the same ordinal position in the last-harvested flat node list.
+  //
+  // The whole Journey Explorer UI (cards, edges, the Breakdown dialog) lives
+  // inside a shadow-DOM web component (<app-journey-analysis>), confirmed
+  // live — a plain document.querySelectorAll from the top-level document
+  // finds none of it. A MutationObserver on document.documentElement also
+  // can't see into shadow roots. So: (1) shadow-pierce for the ordinal
+  // count instead of a plain querySelectorAll, and (2) poll for the dialog
+  // instead of observing for it — the existing codebase already polls for
+  // similarly shadow-heavy DOM state elsewhere (e.g. content.js's zone
+  // polling), so this matches an established pattern here, not a new one.
+  // ---------------------------------------------------------
+  function queryAllDeep(selector, root) {
+    const out = [];
+    const walk = node => {
+      if (!node || !node.querySelectorAll) return;
+      node.querySelectorAll(selector).forEach(el => out.push(el));
+      node.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); });
+    };
+    walk(root || document);
+    return out;
+  }
+
+  let _lastClickedCardOrdinal = -1;
+  let _lastClickedAt = 0;
+
+  // The session-card elements aren't the only role="group" nodes on this
+  // page — the edge/arrow SVGs between cards are ALSO role="group" (visible
+  // in the accessibility tree as "Edge from node-X to node-Y"), which threw
+  // off ordinal counting until this was caught live. Cards are reliably the
+  // only role="group" elements whose own text includes "Users".
+  const isCardGroup = el => !!(el && el.getAttribute && el.getAttribute('role') === 'group' && /users/i.test(el.textContent || ''));
+  const queryAllCardGroups = () => queryAllDeep('[role="group"]').filter(isCardGroup);
+
+  document.addEventListener('click', event => {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    let cardEl = path.find(node => node instanceof Element && isCardGroup(node));
+    if (!cardEl) {
+      for (const node of path) {
+        if (!(node instanceof Element)) continue;
+        const candidate = closestAcrossShadowJE(node, '[role="group"]');
+        if (isCardGroup(candidate)) { cardEl = candidate; break; }
+      }
+    }
+    if (!cardEl) return;
+    const ordinal = queryAllCardGroups().indexOf(cardEl);
+    if (ordinal === -1) return;
+    _lastClickedCardOrdinal = ordinal;
+    _lastClickedAt = Date.now();
+  }, true);
+
+  function injectReplayLinks(dialogEl, rule) {
+    if (queryAllDeep('[data-cs-demo-replay-injected]', dialogEl).length) return;
+    const seeReplaysBtn = queryAllDeep('button', dialogEl).find(b => /see replays/i.test(b.textContent || ''));
+    if (!seeReplaysBtn || !seeReplaysBtn.parentElement) return;
+
+    const wrap = document.createElement('span');
+    wrap.setAttribute('data-cs-demo-replay-injected', '1');
+    wrap.style.cssText = 'display:inline-flex;gap:6px;margin-left:8px;';
+    rule.replays.slice(0, 3).forEach(replay => {
+      const link = document.createElement('button');
+      link.textContent = `▶ ${replay.label || 'View replay'}`;
+      link.style.cssText = 'background:#2c2c8c;color:#fff;border:none;border-radius:4px;font-size:11px;padding:4px 8px;cursor:pointer;';
+      link.addEventListener('click', evt => {
+        evt.preventDefault();
+        evt.stopPropagation();
+        window.open(replay.url, '_blank');
+      });
+      wrap.appendChild(link);
+    });
+    seeReplaysBtn.parentElement.insertBefore(wrap, seeReplaysBtn.nextSibling);
+  }
+
+  function pollForBreakdownDialog() {
+    try {
+      if (Date.now() - _lastClickedAt > 4000 || _lastClickedCardOrdinal < 0) return;
+      const dialogs = queryAllDeep('[role="dialog"]');
+      dialogs.forEach(dialogEl => {
+        const heading = queryAllDeep('h1, h2, h3, [role="heading"]', dialogEl)[0];
+        if (!heading || !/breakdown/i.test(heading.textContent || '')) return;
+        const node = _lastHarvestedFlatNodes[_lastClickedCardOrdinal];
+        if (!node) return;
+        const rule = findRuleForPath(node.path);
+        if (!rule) return;
+        injectReplayLinks(dialogEl, rule);
+      });
+    } catch (e) { dbg('replay poll error', e); }
+  }
+  setInterval(pollForBreakdownDialog, 400);
 })();

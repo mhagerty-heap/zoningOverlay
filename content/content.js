@@ -257,6 +257,7 @@
   let heatmapHintTimer = null;
   let heatmapPointOverrides = {};
   let journeyRules = []; // Authoritative in-memory copy — backed by chrome.storage
+  let journeyExplorerRules = []; // Journey Explorer's own rules — separate report, separate API shape, see loadJourneyExplorerRules
   let heatmapOverlayHost = null;
   let heatmapOverlayShadow = null;
   const heatmapSurfaceOverlays = new Map();
@@ -505,6 +506,34 @@
     try {
       window.dispatchEvent(new CustomEvent('cs-demo-journey-rules-updated', {
         detail: { rules: journeyRules }
+      }));
+    } catch (_) {}
+  }
+
+  function loadJourneyExplorerRules() {
+    return new Promise(resolve => {
+      chrome.storage.local.get('csDemoJourneyExplorerRules', result => {
+        try {
+          const raw = result.csDemoJourneyExplorerRules;
+          journeyExplorerRules = Array.isArray(raw) ? raw : [];
+        } catch (_) {
+          journeyExplorerRules = [];
+        }
+        resolve();
+      });
+    });
+  }
+
+  function persistJourneyExplorerRules() {
+    return new Promise(resolve => {
+      chrome.storage.local.set({ csDemoJourneyExplorerRules: journeyExplorerRules }, resolve);
+    });
+  }
+
+  function syncJourneyExplorerRulesToPageWorld() {
+    try {
+      window.dispatchEvent(new CustomEvent('cs-demo-journey-explorer-rules-updated', {
+        detail: { rules: journeyExplorerRules }
       }));
     } catch (_) {}
   }
@@ -2390,7 +2419,7 @@
   }
 
   function getTotalOverrideCount() {
-    return Object.keys(overrides).length + Object.keys(heatmapPointOverrides).length + journeyRules.length;
+    return Object.keys(overrides).length + Object.keys(heatmapPointOverrides).length + journeyRules.length + journeyExplorerRules.length;
   }
 
   function openHeatmapPointEditorAt(clientX, clientY, source = 'unknown', surfaceEl = null, anchorHintEl = null, eventPath = []) {
@@ -5053,13 +5082,13 @@
 
   function normalizeScenarioState(raw) {
     if (!raw || typeof raw !== 'object') {
-      return { overrides: {}, heatmapPoints: {} };
+      return { overrides: {}, heatmapPoints: {}, journeyExplorerRules: [] };
     }
 
     // Backward compatibility: older callers pass only the zoning override map.
     if (!Object.prototype.hasOwnProperty.call(raw, 'overrides')
       && !Object.prototype.hasOwnProperty.call(raw, 'heatmapPoints')) {
-      return { overrides: { ...raw }, heatmapPoints: {} };
+      return { overrides: { ...raw }, heatmapPoints: {}, journeyExplorerRules: [] };
     }
 
     const normalizedHeatmapPoints = {};
@@ -5071,14 +5100,16 @@
 
     return {
       overrides: { ...(raw.overrides || {}) },
-      heatmapPoints: normalizedHeatmapPoints
+      heatmapPoints: normalizedHeatmapPoints,
+      journeyExplorerRules: Array.isArray(raw.journeyExplorerRules) ? [...raw.journeyExplorerRules] : []
     };
   }
 
   function buildScenarioStateSnapshot() {
     return {
       overrides: { ...overrides },
-      heatmapPoints: { ...heatmapPointOverrides }
+      heatmapPoints: { ...heatmapPointOverrides },
+      journeyExplorerRules: [...journeyExplorerRules]
     };
   }
 
@@ -5086,8 +5117,11 @@
     const scenarioState = normalizeScenarioState(nextScenarioState);
     overrides = { ...scenarioState.overrides };
     heatmapPointOverrides = { ...scenarioState.heatmapPoints };
+    journeyExplorerRules = [...scenarioState.journeyExplorerRules];
     await persistOverrides();
     await persistHeatmapPointOverrides();
+    await persistJourneyExplorerRules();
+    syncJourneyExplorerRulesToPageWorld();
     syncZoneWatchers();
     applyAllOverrides();
     renderHeatmapPointOverlays();
@@ -5453,6 +5487,9 @@
     journeyRules = [];
     persistJourneyRules();
     syncJourneyRulesToPageWorld();
+    journeyExplorerRules = [];
+    persistJourneyExplorerRules();
+    syncJourneyExplorerRulesToPageWorld();
 
     // 4. GENTLE RE-TRIGGER
     window.dispatchEvent(new Event('resize'));
@@ -5853,7 +5890,16 @@
       .tab-btn.active .tab-btn-sub { color: #7a7ac9; }
       .inner-tab-pane { display: none; }
       .inner-tab-pane.active { display: block; }
-      
+
+      /* Journeys inner tabs (Sunburst / Explorer) — separate classes from the
+         Zoning inner tabs above so their click handlers don't fight each other. */
+      .jetab-nav { display: flex; border-bottom: 1px solid #ececf6; margin-bottom: 12px; margin-top: 4px; }
+      .jetab-btn { flex: 1; background: none; border: none; padding: 8px 4px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.2px; color: #888; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s; }
+      .jetab-btn:hover { color: #2c2c8c; background: #fafafe; }
+      .jetab-btn.active { color: #2c2c8c; border-bottom: 2px solid #2c2c8c; }
+      .jetab-pane { display: none; }
+      .jetab-pane.active { display: block; }
+
       /* Existing metric tuner styles */
       .metric-tuner-list { max-height: 180px; overflow-y: auto; border: 1px solid #ececf6; border-radius: 8px; padding: 4px; margin-bottom: 12px; background: #fcfcff; }
       .tuner-row { display: grid; grid-template-columns: 1fr 50px 50px; gap: 6px; align-items: center; padding: 4px 6px; border-bottom: 1px solid #f0f0f8; }
@@ -6005,6 +6051,13 @@
       <div id="master-pane-journeys" class="master-pane ${journeysActiveStr}">
          ${editModeWarning}
          <div class="tab-content" style="${disabledOverlayStyle}">
+
+          <div class="jetab-nav">
+            <button class="jetab-btn active" data-jetarget="pane-journey-sunburst">Navigation Paths</button>
+            <button class="jetab-btn" data-jetarget="pane-journey-explorer">Journey Explorer</button>
+          </div>
+
+          <div id="pane-journey-sunburst" class="jetab-pane active">
           <div class="section-label" style="display: flex; align-items: center;">
             Journey Node Editor
             <span class="help-icon" title="Allows you to rename and inflate the size of specific nodes in a Journey Analysis sunburst chart.">[?]</span>
@@ -6017,8 +6070,8 @@
               <button id="btn-journey-pane-left" class="btn btn-pane-selector" data-pane="left" style="padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Compare Left</button>
               <button id="btn-journey-pane-right" class="btn btn-pane-selector" data-pane="right" style="padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Compare Right</button>
               <button id="btn-journey-pane-both" class="btn btn-pane-selector" data-pane="both" style="grid-column: span 2; padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Compare Both</button>
-            </div>           
-           
+            </div>
+
            <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Node:</label>
            <select id="journey-target-node" class="inp" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
              <option value="" disabled selected>Waiting for data...</option>
@@ -6039,7 +6092,129 @@
            <input type="number" id="journey-target-percent" class="inp" placeholder="e.g., 85" min="1" max="100" style="width: 100%; margin-bottom: 15px; opacity: 0.5; transition: opacity 0.2s;" disabled>
 
            <button id="btn-add-journey-rule" class="btn btn-apply" style="width: 100%;" ${isEditing ? '' : 'disabled'}>Add Journey Rule</button>
-         </div>         
+          </div>
+
+          <div id="pane-journey-explorer" class="jetab-pane">
+            <div class="section-label" style="display: flex; align-items: center;">
+              Journey Explorer Editor
+              <span class="help-icon" title="Override Users/Conversion/Drop-off on a session block, edit its Breakdown panel (channels, converted/churned split), fabricate a cross-data-source branch, or attach mocked replay links shown on that block's Breakdown panel.">[?]</span>
+            </div>
+            <div class="hint" style="margin-bottom: 12px;">Select a node from the current Journey Explorer view, or add a fabricated branch under one.</div>
+
+            <div id="je-mode-selector" style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-bottom: 12px;">
+              <button id="btn-je-mode-edit" class="btn btn-pane-selector active" data-jemode="edit" style="padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Edit Node</button>
+              <button id="btn-je-mode-branch" class="btn btn-pane-selector" data-jemode="branch" style="padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Add Branch</button>
+              <button id="btn-je-mode-hide" class="btn btn-pane-selector" data-jemode="hide" style="padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;">Hide Node</button>
+            </div>
+
+            <div id="je-edit-fields">
+              <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Target Node:</label>
+              <select id="je-target-node" class="inp" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
+                <option value="" disabled selected>Waiting for data...</option>
+              </select>
+
+              <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Users (leave blank to keep native):</label>
+              <input type="number" id="je-users" class="inp" placeholder="e.g. 1500" style="width: 100%; margin-bottom: 6px;" ${isEditing ? '' : 'disabled'}>
+              <div class="chk-row" style="margin-bottom: 8px;">
+                <label style="display:flex; cursor:pointer; font-size: 10px; color: #666; font-weight: 600; align-items: center;">
+                  <input type="checkbox" id="chk-je-skip-rebalance" ${isEditing ? '' : 'disabled'}>
+                  <span style="margin-left: 6px;">Set as exact value (skip automatic sibling rebalancing)</span>
+                </label>
+                <span class="help-icon" title="Default (unchecked): raising this node's Users steals volume from its siblings proportionally — use for 'this flow diverted from an existing one'. Checked: sets this node's Users in isolation, no effect on siblings — use when siblings are independently-sized outcome buckets of the same parent (e.g. 'returned on web' vs 'returned on mobile'), since otherwise each one's rebalance zeroes out the other.">[?]</span>
+              </div>
+
+              <div class="row" style="margin-bottom: 8px;">
+                <input type="number" id="je-conversion-pct" class="inp" placeholder="Conversion %" min="0" max="100" ${isEditing ? '' : 'disabled'}>
+                <input type="number" id="je-churn-pct" class="inp" placeholder="Drop-off %" min="0" max="100" ${isEditing ? '' : 'disabled'}>
+              </div>
+
+              <div class="chk-row" style="margin-bottom: 6px;">
+                <label style="display:flex; cursor:pointer; font-size: 11px; color: #666; font-weight: 600; align-items: center;">
+                  <input type="checkbox" id="chk-je-breakdown" ${isEditing ? '' : 'disabled'}>
+                  <span style="margin-left: 6px;">Edit Breakdown panel (channels, converted/churned split)</span>
+                </label>
+              </div>
+              <div id="je-breakdown-fields" style="display:none; padding: 8px; background:#fafafe; border-radius:6px; margin-bottom: 8px;">
+                <label style="font-size: 10px; color:#888; display:block; margin-bottom:4px;">Converted → returned next session / dropped off (%):</label>
+                <div class="row" style="margin-bottom: 6px;">
+                  <input type="number" id="je-bd-converted-returned" class="inp" placeholder="Returned %" min="0" max="100">
+                  <input type="number" id="je-bd-converted-not-returned" class="inp" placeholder="Dropped off %" min="0" max="100">
+                </div>
+                <label style="font-size: 10px; color:#888; display:block; margin-bottom:4px;">Did not convert → returned next session / dropped off (%):</label>
+                <div class="row" style="margin-bottom: 6px;">
+                  <input type="number" id="je-bd-notconverted-returned" class="inp" placeholder="Returned %" min="0" max="100">
+                  <input type="number" id="je-bd-notconverted-not-returned" class="inp" placeholder="Dropped off %" min="0" max="100">
+                </div>
+                <div class="row" style="margin-bottom: 6px;">
+                  <input type="number" id="je-avg-session-sec" class="inp" placeholder="Avg session time (sec)">
+                  <input type="number" id="je-avg-pages" class="inp" placeholder="Avg pages viewed">
+                </div>
+                <label style="font-size: 10px; color:#888; display:block; margin-bottom:4px;">Marketing channels (name + % of session):</label>
+                <div id="je-channel-rows">
+                  ${[0, 1, 2, 3].map(i => `
+                    <div class="row" style="margin-bottom: 4px;">
+                      <input type="text" class="inp je-channel-name" data-row="${i}" placeholder="Channel name">
+                      <input type="number" class="inp je-channel-pct" data-row="${i}" placeholder="%" min="0" max="100">
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+
+              <div class="chk-row" style="margin-bottom: 6px;">
+                <label style="display:flex; cursor:pointer; font-size: 11px; color: #666; font-weight: 600; align-items: center;">
+                  <input type="checkbox" id="chk-je-replays" ${isEditing ? '' : 'disabled'}>
+                  <span style="margin-left: 6px;">Mocked replay links (shown on this node's Breakdown panel)</span>
+                </label>
+              </div>
+              <div id="je-replay-fields" style="display:none; padding: 8px; background:#fafafe; border-radius:6px; margin-bottom: 8px;">
+                ${[0, 1, 2].map(i => `
+                  <div class="row" style="margin-bottom: 4px;">
+                    <input type="text" class="inp je-replay-label" data-row="${i}" placeholder="Label, e.g. Cart abandon">
+                    <input type="text" class="inp je-replay-url" data-row="${i}" placeholder="Replay URL">
+                  </div>
+                `).join('')}
+              </div>
+
+              <button id="btn-je-add-override" class="btn btn-apply" style="width: 100%;" ${isEditing ? '' : 'disabled'}>Add / Update Rule</button>
+            </div>
+
+            <div id="je-branch-fields" style="display:none;">
+              <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Parent Node:</label>
+              <select id="je-parent-node" class="inp" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
+                <option value="" disabled selected>Waiting for data...</option>
+              </select>
+
+              <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">New Data Source:</label>
+              <select id="je-new-datasource" class="inp" style="width: 100%; margin-bottom: 12px;" ${isEditing ? '' : 'disabled'}>
+                <option value="" disabled selected>Waiting for data...</option>
+              </select>
+
+              <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Users:</label>
+              <input type="number" id="je-branch-users" class="inp" placeholder="e.g. 200" style="width: 100%; margin-bottom: 8px;" ${isEditing ? '' : 'disabled'}>
+
+              <div class="row" style="margin-bottom: 12px;">
+                <input type="number" id="je-branch-conversion-pct" class="inp" placeholder="Conversion %" min="0" max="100" ${isEditing ? '' : 'disabled'}>
+                <input type="number" id="je-branch-churn-pct" class="inp" placeholder="Drop-off %" min="0" max="100" ${isEditing ? '' : 'disabled'}>
+              </div>
+
+              <button id="btn-je-add-branch" class="btn btn-apply" style="width: 100%;" ${isEditing ? '' : 'disabled'}>Add Branch</button>
+            </div>
+
+            <div id="je-hide-fields" style="display:none;">
+              <label style="font-size: 10px; font-weight: 700; color:#888; margin-bottom: 4px; display: block;">Node to hide:</label>
+              <select id="je-hide-node" class="inp" style="width: 100%; margin-bottom: 8px;" ${isEditing ? '' : 'disabled'}>
+                <option value="" disabled selected>Waiting for data...</option>
+              </select>
+              <div class="hint" style="margin-bottom: 12px;">Removes this node (and anything under it) from the report entirely — use to clean up small native paths that clutter a demo view. Delete the rule below to bring it back.</div>
+              <button id="btn-je-hide-node" class="btn btn-apply" style="width: 100%; background:#cc3333;" ${isEditing ? '' : 'disabled'}>Hide Node</button>
+            </div>
+
+            <hr style="border:none;border-top:1px solid #ececf6;margin:12px 0;">
+            <div class="section-label">Active Explorer Rules</div>
+            <div id="je-rules-list"></div>
+          </div>
+
+         </div>
       </div>
     `;
 
@@ -6190,6 +6365,271 @@
     };
     // Run it immediately if data is already there!
     window.__csUpdateJourneyDropdown();
+
+    // --- JOURNEY EXPLORER LOGIC ---
+
+    // UI LOGIC: JOURNEYS INNER TABS (Sunburst / Explorer) — separate classes/wiring
+    // from the Zoning inner tabs below so the two "clear all .active" loops don't
+    // fight each other across master panes.
+    const jeTabBtns = shadow.querySelectorAll('.jetab-btn');
+    const jeTabPanes = shadow.querySelectorAll('.jetab-pane');
+    jeTabBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        jeTabBtns.forEach(b => b.classList.remove('active'));
+        jeTabPanes.forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        shadow.getElementById(btn.dataset.jetarget).classList.add('active');
+      });
+    });
+
+    // UI LOGIC: EDIT vs BRANCH vs HIDE MODE
+    const jeEditFields = shadow.getElementById('je-edit-fields');
+    const jeBranchFields = shadow.getElementById('je-branch-fields');
+    const jeHideFields = shadow.getElementById('je-hide-fields');
+    shadow.querySelectorAll('#je-mode-selector .btn-pane-selector').forEach(btn => {
+      btn.addEventListener('click', () => {
+        shadow.querySelectorAll('#je-mode-selector .btn-pane-selector').forEach(b => {
+          b.classList.remove('active');
+          b.style.cssText = "padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #fafafe; color: #888; border: 1.5px solid #d0d0e0; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
+        });
+        btn.classList.add('active');
+        btn.style.cssText = "padding: 6px 4px; font-size: 10px; font-weight:700; cursor:pointer; background: #eeeefa; color: #2c2c8c; border: 1.5px solid #2c2c8c; border-radius: 6px; font-family:inherit; text-transform:uppercase;";
+        const mode = btn.dataset.jemode;
+        if (jeEditFields) jeEditFields.style.display = mode === 'edit' ? '' : 'none';
+        if (jeBranchFields) jeBranchFields.style.display = mode === 'branch' ? '' : 'none';
+        if (jeHideFields) jeHideFields.style.display = mode === 'hide' ? '' : 'none';
+      });
+    });
+
+    // UI LOGIC: SHOW/HIDE BREAKDOWN & REPLAY SUB-SECTIONS
+    shadow.getElementById('chk-je-breakdown')?.addEventListener('change', e => {
+      const fields = shadow.getElementById('je-breakdown-fields');
+      if (fields) fields.style.display = e.target.checked ? 'block' : 'none';
+    });
+    shadow.getElementById('chk-je-replays')?.addEventListener('change', e => {
+      const fields = shadow.getElementById('je-replay-fields');
+      if (fields) fields.style.display = e.target.checked ? 'block' : 'none';
+    });
+
+    // DROPDOWN POPULATOR: target/parent node pickers + new-data-source picker
+    window.__csUpdateJourneyExplorerDropdowns = () => {
+      const nodes = Array.isArray(window.__csJourneyExplorerNodes) ? window.__csJourneyExplorerNodes : [];
+      const names = window.__csJourneyExplorerDataSourceNames || {};
+
+      [shadow.getElementById('je-target-node'), shadow.getElementById('je-parent-node'), shadow.getElementById('je-hide-node')].forEach(select => {
+        if (!select) return;
+        const prevValue = select.value;
+        select.innerHTML = `<option value="" disabled selected>Select a node (${nodes.length} found)...</option>`;
+        nodes.forEach(node => {
+          const opt = document.createElement('option');
+          opt.value = JSON.stringify(node.path);
+          opt.textContent = node.label;
+          select.appendChild(opt);
+        });
+        if (prevValue && nodes.some(n => JSON.stringify(n.path) === prevValue)) select.value = prevValue;
+      });
+
+      const dsSelect = shadow.getElementById('je-new-datasource');
+      if (dsSelect) {
+        const uniqueIds = Array.from(new Set(nodes.map(n => n.dataSourceId)));
+        dsSelect.innerHTML = `<option value="" disabled selected>Select a data source...</option>`;
+        uniqueIds.forEach(id => {
+          const opt = document.createElement('option');
+          opt.value = String(id);
+          opt.textContent = names[id] || `Source ${id}`;
+          dsSelect.appendChild(opt);
+        });
+      }
+    };
+    window.__csUpdateJourneyExplorerDropdowns();
+
+    // ACTIVE RULES LIST
+    const renderJourneyExplorerRulesList = () => {
+      const listContainer = shadow.getElementById('je-rules-list');
+      if (!listContainer) return;
+      if (journeyExplorerRules.length === 0) {
+        listContainer.innerHTML = '<div class="hint" style="text-align:center; padding: 10px 0;">No active rules.</div>';
+        return;
+      }
+      const nodes = Array.isArray(window.__csJourneyExplorerNodes) ? window.__csJourneyExplorerNodes : [];
+      const labelForPath = path => {
+        const match = nodes.find(n => JSON.stringify(n.path) === JSON.stringify(path));
+        return match ? match.label : `Node [${path.join(',')}]`;
+      };
+      listContainer.innerHTML = journeyExplorerRules.map((r, i) => {
+        const summaryBits = [];
+        if (r.kind === 'branch') {
+          summaryBits.push(`+branch → Source ${r.newDataSourceId}`);
+          if (typeof r.users === 'number') summaryBits.push(`${r.users} users`);
+        } else if (r.kind === 'hide') {
+          summaryBits.push('hidden from report');
+        } else {
+          if (typeof r.users === 'number') summaryBits.push(`${r.users} users`);
+          if (typeof r.conversionPct === 'number') summaryBits.push(`${r.conversionPct}% conv`);
+          if (typeof r.churnPct === 'number') summaryBits.push(`${r.churnPct}% drop`);
+          if (r.breakdown) summaryBits.push('breakdown');
+          if (Array.isArray(r.replays) && r.replays.length) summaryBits.push(`${r.replays.length} replay(s)`);
+        }
+        const label = r.kind === 'branch' ? labelForPath(r.parentPath) : labelForPath(r.path);
+        return `
+        <div style="display:flex; justify-content:space-between; align-items:center; background:#fff; border:1px solid #e0e0f0; padding:6px 10px; border-radius:6px; margin-bottom:6px;">
+          <div style="overflow:hidden; flex:1; padding-right:10px;">
+            <div style="font-weight:600; font-size:11px; white-space:nowrap; text-overflow:ellipsis; margin-bottom:2px;">${escHtml(label)}</div>
+            <div style="font-size:10px; color:#888;">${escHtml(summaryBits.join(' · ') || 'No changes set')}</div>
+          </div>
+          <button class="btn-del-je-rule" data-index="${i}" style="background:#fff0f0; color:#cc3333; border:1px solid #ffcccc; border-radius:4px; font-size:10px; padding:3px 6px; cursor:pointer; flex-shrink:0;">✕</button>
+        </div>
+        `;
+      }).join('');
+
+      shadow.querySelectorAll('.btn-del-je-rule').forEach(btn => {
+        btn.addEventListener('click', e => {
+          const idx = parseInt(e.target.dataset.index, 10);
+          journeyExplorerRules.splice(idx, 1);
+          persistJourneyExplorerRules();
+          syncJourneyExplorerRulesToPageWorld();
+          renderJourneyExplorerRulesList();
+          updateToolbar();
+        });
+      });
+    };
+    renderJourneyExplorerRulesList();
+
+    // ADD/UPDATE OVERRIDE RULE
+    shadow.getElementById('btn-je-add-override')?.addEventListener('click', () => {
+      const targetRaw = shadow.getElementById('je-target-node').value;
+      if (!targetRaw) return alert('Please select a target node.');
+      const path = JSON.parse(targetRaw);
+      const nodes = Array.isArray(window.__csJourneyExplorerNodes) ? window.__csJourneyExplorerNodes : [];
+      const match = nodes.find(n => JSON.stringify(n.path) === targetRaw);
+      if (!match) return alert('That node is no longer available — refresh the report and try again.');
+
+      const readNum = id => {
+        const raw = shadow.getElementById(id)?.value;
+        return raw !== '' && raw !== undefined && raw !== null ? parseFloat(raw) : null;
+      };
+
+      // Merge onto any existing rule for this path — an edit that only sets
+      // e.g. replays shouldn't blank out a Users/Conversion override made
+      // earlier. A blank field this time keeps whatever was already set.
+      const existing = journeyExplorerRules.find(r => r.kind === 'override' && JSON.stringify(r.path) === JSON.stringify(path));
+
+      const rule = {
+        kind: 'override',
+        path,
+        dataSourceIdChainAtCreate: match.dataSourceIdChain,
+        users: readNum('je-users') ?? (existing ? existing.users : null),
+        skipRebalance: shadow.getElementById('chk-je-skip-rebalance')?.checked || false,
+        conversionPct: readNum('je-conversion-pct') ?? (existing ? existing.conversionPct : null),
+        churnPct: readNum('je-churn-pct') ?? (existing ? existing.churnPct : null),
+        breakdown: existing ? existing.breakdown : null,
+        channels: existing ? existing.channels : null,
+        avgSessionDurationMsec: existing ? existing.avgSessionDurationMsec : null,
+        avgPagesViewedPerSession: existing ? existing.avgPagesViewedPerSession : null,
+        replays: existing ? existing.replays : null,
+        createdAt: existing ? existing.createdAt : Date.now()
+      };
+
+      if (shadow.getElementById('chk-je-breakdown')?.checked) {
+        rule.breakdown = {
+          convertedReturnedPct: readNum('je-bd-converted-returned'),
+          convertedNotReturnedPct: readNum('je-bd-converted-not-returned'),
+          notConvertedReturnedPct: readNum('je-bd-notconverted-returned'),
+          notConvertedNotReturnedPct: readNum('je-bd-notconverted-not-returned')
+        };
+        const avgSec = readNum('je-avg-session-sec');
+        if (avgSec !== null) rule.avgSessionDurationMsec = avgSec * 1000;
+        rule.avgPagesViewedPerSession = readNum('je-avg-pages');
+        const channels = [];
+        shadow.querySelectorAll('.je-channel-name').forEach(inp => {
+          const row = inp.dataset.row;
+          const name = inp.value.trim();
+          const pctInp = shadow.querySelector(`.je-channel-pct[data-row="${row}"]`);
+          const pct = pctInp && pctInp.value !== '' ? parseFloat(pctInp.value) : null;
+          if (name && pct !== null) channels.push({ name, usersPercentage: pct });
+        });
+        if (channels.length) rule.channels = channels;
+      }
+
+      if (shadow.getElementById('chk-je-replays')?.checked) {
+        const replays = [];
+        shadow.querySelectorAll('.je-replay-label').forEach(inp => {
+          const row = inp.dataset.row;
+          const label = inp.value.trim();
+          const urlInp = shadow.querySelector(`.je-replay-url[data-row="${row}"]`);
+          const url = urlInp ? urlInp.value.trim() : '';
+          if (label && url) replays.push({ label, url });
+        });
+        if (replays.length) rule.replays = replays;
+      }
+
+      journeyExplorerRules = journeyExplorerRules.filter(r => !(r.kind === 'override' && JSON.stringify(r.path) === JSON.stringify(path)));
+      journeyExplorerRules.push(rule);
+      persistJourneyExplorerRules();
+      syncJourneyExplorerRulesToPageWorld();
+      renderJourneyExplorerRulesList();
+      updateToolbar();
+      alert('Journey Explorer rule saved.');
+    });
+
+    // ADD BRANCH RULE
+    shadow.getElementById('btn-je-add-branch')?.addEventListener('click', () => {
+      const parentRaw = shadow.getElementById('je-parent-node').value;
+      const dsRaw = shadow.getElementById('je-new-datasource').value;
+      if (!parentRaw) return alert('Please select a parent node.');
+      if (!dsRaw) return alert('Please select the new branch\'s data source.');
+
+      const parentPath = JSON.parse(parentRaw);
+      const nodes = Array.isArray(window.__csJourneyExplorerNodes) ? window.__csJourneyExplorerNodes : [];
+      const match = nodes.find(n => JSON.stringify(n.path) === parentRaw);
+      if (!match) return alert('That node is no longer available — refresh the report and try again.');
+
+      const readNum = id => {
+        const raw = shadow.getElementById(id)?.value;
+        return raw !== '' && raw !== undefined && raw !== null ? parseFloat(raw) : null;
+      };
+
+      const rule = {
+        kind: 'branch',
+        parentPath,
+        parentDataSourceIdChainAtCreate: match.dataSourceIdChain,
+        newDataSourceId: parseInt(dsRaw, 10),
+        users: readNum('je-branch-users'),
+        conversionPct: readNum('je-branch-conversion-pct'),
+        churnPct: readNum('je-branch-churn-pct'),
+        createdAt: Date.now()
+      };
+
+      journeyExplorerRules.push(rule);
+      persistJourneyExplorerRules();
+      syncJourneyExplorerRulesToPageWorld();
+      renderJourneyExplorerRulesList();
+      updateToolbar();
+      alert('Fabricated branch added.');
+    });
+
+    // HIDE NODE RULE
+    shadow.getElementById('btn-je-hide-node')?.addEventListener('click', () => {
+      const targetRaw = shadow.getElementById('je-hide-node').value;
+      if (!targetRaw) return alert('Please select a node to hide.');
+      const path = JSON.parse(targetRaw);
+      const nodes = Array.isArray(window.__csJourneyExplorerNodes) ? window.__csJourneyExplorerNodes : [];
+      const match = nodes.find(n => JSON.stringify(n.path) === targetRaw);
+      if (!match) return alert('That node is no longer available — refresh the report and try again.');
+
+      journeyExplorerRules = journeyExplorerRules.filter(r => !(r.kind === 'hide' && JSON.stringify(r.path) === JSON.stringify(path)));
+      journeyExplorerRules.push({
+        kind: 'hide',
+        path,
+        dataSourceIdChainAtCreate: match.dataSourceIdChain,
+        createdAt: Date.now()
+      });
+      persistJourneyExplorerRules();
+      syncJourneyExplorerRulesToPageWorld();
+      renderJourneyExplorerRulesList();
+      updateToolbar();
+      alert('Node will be hidden on next refresh.');
+    });
 
     // UI LOGIC: MASTER TABS
     shadow.querySelectorAll('.master-tab-btn').forEach(btn => {
@@ -6500,7 +6940,12 @@
         return { layer, label: getHeatmapLayerLabel(layer), points };
       });
 
-      const total = zoningEntries.length + heatmapEntries.length + journeyRules.length;
+      const total = zoningEntries.length + heatmapEntries.length + journeyRules.length + journeyExplorerRules.length;
+      const jeNodes = Array.isArray(window.__csJourneyExplorerNodes) ? window.__csJourneyExplorerNodes : [];
+      const jeLabelForPath = path => {
+        const match = jeNodes.find(n => JSON.stringify(n.path) === JSON.stringify(path));
+        return match ? match.label : `Node [${(path || []).join(',')}]`;
+      };
       const reportMatch = getUrlKey().match(/\/zoning-v2\/(\d+)/);
       const reportId = reportMatch ? reportMatch[1] : '';
 
@@ -6574,6 +7019,35 @@
                 `;
               }).join('')}
           </div>
+
+          <hr class="section-divider">
+
+          <div class="section-label">Journey Explorer (${journeyExplorerRules.length})</div>
+          <div class="list">
+            ${journeyExplorerRules.length === 0 ? '<div class="empty">No Journey Explorer edits</div>' : journeyExplorerRules.map((r, i) => {
+                const label = r.kind === 'branch' ? jeLabelForPath(r.parentPath) : jeLabelForPath(r.path);
+                const metaBits = [];
+                if (r.kind === 'branch') {
+                  metaBits.push(`+branch → Source ${r.newDataSourceId}`);
+                  if (typeof r.users === 'number') metaBits.push(`${r.users} users`);
+                } else if (r.kind === 'hide') {
+                  metaBits.push('hidden from report');
+                } else {
+                  if (typeof r.users === 'number') metaBits.push(`${r.users} users`);
+                  if (typeof r.conversionPct === 'number') metaBits.push(`${r.conversionPct}% conv`);
+                  if (typeof r.churnPct === 'number') metaBits.push(`${r.churnPct}% drop`);
+                  if (r.breakdown) metaBits.push('breakdown');
+                  if (Array.isArray(r.replays) && r.replays.length) metaBits.push(`${r.replays.length} replay(s)`);
+                }
+                return `
+                <div class="item">
+                  <span class="name" title="${escHtml(label)}">${escHtml(label)}</span>
+                  <span class="meta">${escHtml(metaBits.join(' · ') || 'No changes set')}</span>
+                  <button class="btn-del" data-kind="journeyExplorer" data-index="${i}">Delete</button>
+                </div>
+                `;
+              }).join('')}
+          </div>
         </div>
       `;
 
@@ -6595,6 +7069,10 @@
           journeyRules.splice(parseInt(index, 10), 1);
           await persistJourneyRules();
           syncJourneyRulesToPageWorld();
+        } else if (kind === 'journeyExplorer') {
+          journeyExplorerRules.splice(parseInt(index, 10), 1);
+          await persistJourneyExplorerRules();
+          syncJourneyExplorerRulesToPageWorld();
         } else if (kind === 'heatmap') {
           delete heatmapPointOverrides[key];
           await persistHeatmapPointOverrides();
@@ -6798,7 +7276,7 @@
             <input id="inp-name" class="inp" type="text" placeholder="Scenario name..." maxlength="50">
             <button class="btn btn-save" id="btn-save-sc">Save</button>
           </div>
-          <div class="section-label" style="margin-top:-8px;margin-bottom:12px;text-transform:none;letter-spacing:0;font-size:11px;color:#9a9ab0;">Save includes zoning + heatmap edits.</div>
+          <div class="section-label" style="margin-top:-8px;margin-bottom:12px;text-transform:none;letter-spacing:0;font-size:11px;color:#9a9ab0;">Save includes zoning + heatmap + Journey Explorer edits.</div>
           <div class="section-header-row">
             <span class="section-label">Saved (${items.length})</span>
             <button class="btn btn-file" id="btn-export">⬇ Export All</button>
@@ -6808,7 +7286,7 @@
             ${items.length === 0 ? '<div class="empty">No scenarios for this page</div>' : items.map(([name, sc]) => `
               <div class="scenario-item">
                 <span class="scenario-name" title="${escHtml(name)}">${escHtml(name)}</span>
-                <span class="scenario-meta">${Object.keys(sc.overrides || {}).length} zoning + ${Object.keys(sc.heatmapPoints || {}).length} heatmap</span>
+                <span class="scenario-meta">${Object.keys(sc.overrides || {}).length} zoning + ${Object.keys(sc.heatmapPoints || {}).length} heatmap + ${(sc.journeyExplorerRules || []).length} explorer</span>
                 <button class="btn btn-export-sc" data-export="${escHtml(name)}" title="Export this scenario only">⬇</button>
                 <button class="btn btn-load" data-load="${escHtml(name)}">Load</button>
                 <button class="btn btn-del" data-del="${escHtml(name)}">✕</button>
@@ -6892,7 +7370,8 @@
                       url: sc.url || getUrlKey(),
                       createdAt: sc.createdAt || Date.now(),
                       overrides: { ...(sc.overrides || {}) },
-                      heatmapPoints: { ...(sc.heatmapPoints || {}) }
+                      heatmapPoints: { ...(sc.heatmapPoints || {}) },
+                      journeyExplorerRules: Array.isArray(sc.journeyExplorerRules) ? [...sc.journeyExplorerRules] : []
                     };
                     all[name] = normalized;
                     imported++;
@@ -6917,7 +7396,7 @@
       shadow.getElementById('btn-save-sc').addEventListener('click', () => {
         const name = shadow.getElementById('inp-name').value.trim();
         if (!name) return;
-        const count = Object.keys(overrides).length + Object.keys(heatmapPointOverrides).length;
+        const count = Object.keys(overrides).length + Object.keys(heatmapPointOverrides).length + journeyExplorerRules.length;
         if (count === 0 && !confirm('No current edits to save. Save empty scenario?')) return;
         chrome.storage.local.get('csZoningScenarios', result => {
           const all = result.csZoningScenarios || {};
@@ -6928,7 +7407,8 @@
             createdAt: existing.createdAt || Date.now(),
             updatedAt: Date.now(),
             overrides: { ...overrides },
-            heatmapPoints: { ...heatmapPointOverrides }
+            heatmapPoints: { ...heatmapPointOverrides },
+            journeyExplorerRules: [...journeyExplorerRules]
           };
           chrome.storage.local.set({ csZoningScenarios: all }, () => renderPanel());
         });
@@ -7550,10 +8030,20 @@
 
     // --- CATCH THE JOURNEY SCRAPER PAYLOAD ---
     if (event.data && event.data.type === 'CS_JOURNEY_NODES_SCRAPED') {
-      window.__csJourneyNodes = event.data.nodes; 
+      window.__csJourneyNodes = event.data.nodes;
       // If the advanced menu is open, tell it to update the dropdown!
       if (typeof window.__csUpdateJourneyDropdown === 'function') {
         window.__csUpdateJourneyDropdown();
+      }
+      return;
+    }
+
+    // --- CATCH THE JOURNEY EXPLORER SCRAPER PAYLOAD ---
+    if (event.data && event.data.type === 'CS_JOURNEY_EXPLORER_NODES_SCRAPED') {
+      window.__csJourneyExplorerNodes = Array.isArray(event.data.nodes) ? event.data.nodes : [];
+      window.__csJourneyExplorerDataSourceNames = (event.data.dataSourceNames && typeof event.data.dataSourceNames === 'object') ? event.data.dataSourceNames : {};
+      if (typeof window.__csUpdateJourneyExplorerDropdowns === 'function') {
+        window.__csUpdateJourneyExplorerDropdowns();
       }
       return;
     }
@@ -8277,6 +8767,8 @@
     await loadHeatmapPointOverrides();
     await loadJourneyRules();
     syncJourneyRulesToPageWorld();
+    await loadJourneyExplorerRules();
+    syncJourneyExplorerRulesToPageWorld();
     //console.log('[ZONING-DEBUG][init] Loaded heatmapPointOverrides:', Object.keys(heatmapPointOverrides));
 
     // 3. Start Document Observer

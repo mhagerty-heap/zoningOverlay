@@ -1,0 +1,250 @@
+{
+  "version": 1,
+  "exportedAt": "2026-09-25T17:28:11.698Z",
+  "pageKey": "https://app.contentsquare.com/#/analyze/navigation-path",
+  "scenarios": {
+    "Mobile Drop-off Re-engagement Demo": {
+      "createdAt": 1790355633102,
+      "heatmapPoints": {},
+      "journeyExplorerRules": [
+        {
+          "churnPct": 10,
+          "conversionPct": 5,
+          "createdAt": 1,
+          "kind": "branch",
+          "newDataSourceId": 861516,
+          "parentDataSourceIdChainAtCreate": [
+            861524,
+            861524
+          ],
+          "parentPath": [
+            0,
+            0
+          ],
+          "users": 90
+        },
+        {
+          "churnPct": 10,
+          "conversionPct": 15,
+          "createdAt": 2,
+          "kind": "branch",
+          "newDataSourceId": 861524,
+          "parentDataSourceIdChainAtCreate": [
+            861524,
+            861524,
+            861516
+          ],
+          "parentPath": [
+            0,
+            0,
+            1
+          ],
+          "users": 70
+        },
+        {
+          "churnPct": 10,
+          "conversionPct": 45,
+          "createdAt": 3,
+          "kind": "branch",
+          "newDataSourceId": 861524,
+          "parentDataSourceIdChainAtCreate": [
+            861524,
+            861524,
+            861516,
+            861524
+          ],
+          "parentPath": [
+            0,
+            0,
+            1,
+            0
+          ],
+          "users": 55
+        },
+        {
+          "avgPagesViewedPerSession": null,
+          "avgSessionDurationMsec": null,
+          "breakdown": {
+            "convertedNotReturnedPct": 2.4,
+            "convertedReturnedPct": 0.6,
+            "notConvertedNotReturnedPct": 55,
+            "notConvertedReturnedPct": 42
+          },
+          "channels": [
+            {
+              "name": "Paid Social",
+              "usersPercentage": 45
+            },
+            {
+              "name": "Email",
+              "usersPercentage": 30
+            },
+            {
+              "name": "Organic",
+              "usersPercentage": 25
+            }
+          ],
+          "churnPct": 55,
+          "conversionPct": 3,
+          "createdAt": 4,
+          "dataSourceIdChainAtCreate": [
+            861516
+          ],
+          "kind": "override",
+          "path": [
+            1
+          ],
+          "replays": null,
+          "skipRebalance": true,
+          "users": 1000
+        },
+        {
+          "avgPagesViewedPerSession": null,
+          "avgSessionDurationMsec": null,
+          "breakdown": null,
+          "channels": null,
+          "churnPct": 60,
+          "conversionPct": 8,
+          "createdAt": 5,
+          "dataSourceIdChainAtCreate": [
+            861516,
+            861516
+          ],
+          "kind": "override",
+          "path": [
+            1,
+            0
+          ],
+          "replays": null,
+          "skipRebalance": true,
+          "users": 170
+        },
+        {
+          "avgPagesViewedPerSession": null,
+          "avgSessionDurationMsec": null,
+          "breakdown": {
+            "convertedNotReturnedPct": 28,
+            "convertedReturnedPct": 12,
+            "notConvertedNotReturnedPct": 10,
+            "notConvertedReturnedPct": 50
+          },
+          "channels": null,
+          "churnPct": 10,
+          "conversionPct": 40,
+          "createdAt": 6,
+          "dataSourceIdChainAtCreate": [
+            861516,
+            861524
+          ],
+          "kind": "override",
+          "path": [
+            1,
+            1
+          ],
+          "replays": null,
+          "skipRebalance": true,
+          "users": 250
+        },
+        {
+          "avgPagesViewedPerSession": null,
+          "avgSessionDurationMsec": null,
+          "breakdown": {
+            "convertedNotReturnedPct": 7,
+            "convertedReturnedPct": 3,
+            "notConvertedNotReturnedPct": 20,
+            "notConvertedReturnedPct": 70
+          },
+          "channels": null,
+          "churnPct": 20,
+          "conversionPct": 10,
+          "createdAt": 7,
+          "dataSourceIdChainAtCreate": [
+            861516,
+            861524,
+            861516
+          ],
+          "kind": "override",
+          "path": [
+            1,
+            1,
+            0
+          ],
+          "replays": null,
+          "skipRebalance": true,
+          "users": 90
+        },
+        {
+          "breakdown": {
+            "convertedNotReturnedPct": 40,
+            "convertedReturnedPct": 20,
+            "notConvertedNotReturnedPct": 5,
+            "notConvertedReturnedPct": 35
+          },
+          "churnPct": 5,
+          "conversionPct": 60,
+          "createdAt": 8,
+          "kind": "branch",
+          "newDataSourceId": 861524,
+          "parentDataSourceIdChainAtCreate": [
+            861516,
+            861524,
+            861516
+          ],
+          "parentPath": [
+            1,
+            1,
+            0
+          ],
+          "users": 65
+        },
+        {
+          "createdAt": 1790357100780,
+          "dataSourceIdChainAtCreate": [
+            861516,
+            861516,
+            861524
+          ],
+          "kind": "hide",
+          "path": [
+            1,
+            0,
+            1
+          ]
+        },
+        {
+          "createdAt": 9,
+          "dataSourceIdChainAtCreate": [
+            861516,
+            861516,
+            861516
+          ],
+          "kind": "hide",
+          "path": [
+            1,
+            0,
+            0
+          ]
+        },
+        {
+          "createdAt": 10,
+          "dataSourceIdChainAtCreate": [
+            861516,
+            861524,
+            861516,
+            861516
+          ],
+          "kind": "hide",
+          "path": [
+            1,
+            1,
+            0,
+            0
+          ]
+        }
+      ],
+      "overrides": {},
+      "updatedAt": 1790357286455,
+      "url": "https://app.contentsquare.com/#/analyze/navigation-path"
+    }
+  }
+}
