@@ -5504,7 +5504,11 @@
     if (count === 0) return;
     
     if (skipConfirm !== true) {
-      if (!confirm(`Reset all ${count} override${count !== 1 ? 's' : ''} on this page?`)) return;
+      const hasJourneyEdits = journeyRules.length > 0 || journeyExplorerRules.length > 0;
+      const reloadNote = hasJourneyEdits
+        ? '\n\nJourney/Journey Explorer edits are applied on fetch, not live — reload the page after this to see native data.'
+        : '';
+      if (!confirm(`Reset all ${count} override${count !== 1 ? 's' : ''} on this page?${reloadNote}`)) return;
     }
 
     if (isTopFrame) {
