@@ -3105,8 +3105,13 @@
       const visibleTriggers = [];
 
       for (const t of triggers) {
-        const span = t.querySelector('span') || t;
-        const text = span.textContent?.trim()?.toLowerCase() || "";
+        // Newer zoning-v2 markup wraps the label in its own span but puts
+        // decorative icon spans (empty textContent) before it in DOM order —
+        // querySelector('span') alone grabs the icon, not the label. Find
+        // the first descendant span that actually has text instead.
+        const spans = t.querySelectorAll('span');
+        const labelSpan = Array.from(spans).find(s => (s.textContent || '').trim()) || t;
+        const text = labelSpan.textContent?.trim()?.toLowerCase() || "";
         const rect = t.getBoundingClientRect();
 
         if (text && text !== 'select metric' && rect.width > 0 && rect.height > 0) {
