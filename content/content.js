@@ -5746,10 +5746,36 @@
       panes[pKey].push({ el, y: rect.top + rect.height / 2, key: getZoneKey(el) || el.getAttribute('id') });
     });
 
+    const formatMetricValue = (val, type) => {
+      if (type === "currency") {
+        return `$${val.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+      } else if (type === "percent") {
+        return `${val.toFixed(2)}%`;
+      } else if (type === "time") {
+        return `${val.toFixed(2)}s`;
+      } else if (type === "decimal") {
+        return val.toFixed(2);
+      }
+      return Math.round(val).toLocaleString();
+    };
+
+    // Only one side's zones are ever on screen outside of compare/VS mode —
+    // getPaneKey() can't invent a right-pane key when there's no right pane
+    // in the DOM yet. When that's the case, mirror every generated value
+    // onto the opposite side's key too (swapping only the resolved side
+    // marker in an already-computed key, never touching the zoneId), so
+    // data generated in single-pane view is still found after switching
+    // into compare mode, and vice versa. Skip this when both sides are
+    // genuinely visible — each pane already gets its own real data below,
+    // and mirroring on top of that would clobber one side with a synthetic
+    // copy of the other.
+    const paneKeyList = Object.keys(panes);
+    const isSinglePaneGeneration = paneKeyList.length === 1;
+
     metricsLibrary.forEach(m => {
       const isDepthOnly = isDepthOnlyMetric(m.name);
 
-      Object.keys(panes).forEach((pKey) => {
+      paneKeyList.forEach((pKey) => {
         const paneZones = panes[pKey].sort((a, b) => a.y - b.y);
 
         // Pane-Aware Variance: Identify right pane by key, but never for
@@ -5757,14 +5783,26 @@
         // the page regardless of which variant they're on, so there's no
         // realistic "right pane underperforms" story for these.
         const isRightPane = (pKey.includes('right') || getWhisperedPaneSide() === 'right') && !isDepthOnly;
+        const resolvedSide = isRightPane ? 'right' : 'left';
+        const otherSide = resolvedSide === 'right' ? 'left' : 'right';
+        const isOtherRightPane = otherSide === 'right' && !isDepthOnly;
+
         const variance = isRightPane ? varianceMultiplier : 1;
         const pMax = m.max * variance;
         const pMin = m.min * variance;
+
+        const otherVariance = isOtherRightPane ? varianceMultiplier : 1;
+        const otherMax = m.max * otherVariance;
+        const otherMin = m.min * otherVariance;
 
         // EXPLICIT LABELING: Define the exact suffix based on the mode
         let modeSuffix = ' - Non Compare';
         if (isCompareMode) {
             modeSuffix = isRightPane ? ' - Compare (Right Pane)' : ' - Compare (Left Pane)';
+        }
+        let otherModeSuffix = ' - Non Compare';
+        if (isCompareMode) {
+            otherModeSuffix = isOtherRightPane ? ' - Compare (Right Pane)' : ' - Compare (Left Pane)';
         }
 
         // Position ratio is based on actual vertical depth, not sort rank —
@@ -5774,37 +5812,36 @@
         const paneMaxY = paneYs.length ? Math.max(...paneYs) : 0;
         const paneYSpan = paneMaxY - paneMinY;
 
+        // Only swaps the resolved side's own `side:`/`cmp-side:` marker(s) —
+        // never touches the zoneId portion, so a zone whose own id happens
+        // to contain the word "left"/"right" is unaffected.
+        const flipSideInKey = key => key.replace(
+          new RegExp(`(cmp-side:|side:)${resolvedSide}\\b`, 'g'),
+          `$1${otherSide}`
+        );
+
         paneZones.forEach((row, index) => {
-          let val = pMax;
-          if (trueRandom) {
-            // Absolute Chaos
-            val = pMin + Math.random() * (pMax - pMin);
-          } else if (paneZones.length > 1) {
-            const depthRatio = computeDepthRatio(row.y, paneMinY, paneYSpan, isDepthOnly);
-            const ratio = depthRatio !== null ? depthRatio : index / (paneZones.length - 1);
-            // Exposure Rate/Time are pure depth functions — no per-element noise.
-            const noise = isDepthOnly ? 0 : (Math.random() - 0.5) * jitter;
-            const noisyRatio = Math.min(Math.max(ratio + noise, 0), 1);
-            val = pMax - (noisyRatio * (pMax - pMin));
-          }
+          const sharedNoise = isDepthOnly ? 0 : (Math.random() - 0.5) * jitter;
+          const computeVal = (pMinV, pMaxV) => {
+            let val = pMaxV;
+            if (trueRandom) {
+              // Absolute Chaos
+              val = pMinV + Math.random() * (pMaxV - pMinV);
+            } else if (paneZones.length > 1) {
+              const depthRatio = computeDepthRatio(row.y, paneMinY, paneYSpan, isDepthOnly);
+              const ratio = depthRatio !== null ? depthRatio : index / (paneZones.length - 1);
+              // Exposure Rate/Time are pure depth functions — no per-element noise.
+              const noisyRatio = Math.min(Math.max(ratio + sharedNoise, 0), 1);
+              val = pMaxV - (noisyRatio * (pMaxV - pMinV));
+            }
+            return val;
+          };
 
-          let display;
-          if (m.type === "currency") {
-            display = `$${val.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
-          } else if (m.type === "percent") {
-            display = `${val.toFixed(2)}%`;
-          } else if (m.type === "time") {
-            display = `${val.toFixed(2)}s`;
-          } else if (m.type === "decimal") {
-            display = val.toFixed(2);
-          } else {
-            display = Math.round(val).toLocaleString();
-          }
-
+          const val = computeVal(pMin, pMax);
           const overrideKey = `${row.key}@${m.name}`;
-          
+
           overrides[overrideKey] = {
-              metric: display,
+              metric: formatMetricValue(val, m.type),
               value: val,
               origMetric: '—',
               zoneName: `${m.name} All Metrics${modeSuffix}`,
@@ -5812,6 +5849,22 @@
               limitMin: pMin,
               limitMax: pMax
           };
+
+          if (isSinglePaneGeneration) {
+            const mirroredKey = flipSideInKey(row.key);
+            if (mirroredKey !== row.key) {
+              const otherVal = computeVal(otherMin, otherMax);
+              overrides[`${mirroredKey}@${m.name}`] = {
+                  metric: formatMetricValue(otherVal, m.type),
+                  value: otherVal,
+                  origMetric: '—',
+                  zoneName: `${m.name} All Metrics${otherModeSuffix}`,
+                  csMetricTypeName: m.name,
+                  limitMin: otherMin,
+                  limitMax: otherMax
+              };
+            }
+          }
         });
       });
     });
